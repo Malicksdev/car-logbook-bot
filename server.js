@@ -8,6 +8,7 @@ const { registerCar, getUserCars, setActiveCar } = require("./services/carServic
 const { saveLog, getRecentLogs, getLogsThisMonth, deleteLastLog } = require("./services/logService");
 const { parseAmount, detectType, looksLikeLog } = require("./utils/parser");
 const { sendReply } = require("./utils/sendReply");
+const { checkLimit, incrementUsage } = require("./services/usageService");
 
 const supabase = require("./config/supabase");
 
@@ -962,6 +963,20 @@ mileage 30402`;
         return res.sendStatus(200);
       }
 
+      // ── RATE LIMIT: undo (free users, 3/day) ──────────────────────────
+      if (PREMIUM_ENABLED && !isPremium(user)) {
+        const allowed = await checkLimit(user.id, "undo_count");
+        if (!allowed) {
+          reply = `You've used your 3 undos for today — the limit resets tomorrow.
+
+Upgrade for unlimited undos:
+upgrade`;
+          await sendReply(from, reply);
+          return res.sendStatus(200);
+        }
+        await incrementUsage(user.id, "undo_count");
+      }
+
       const deleted = await deleteLastLog(carId);
       reply = deleted
         ? `↩️ Done! Your last log has been removed.`
@@ -997,6 +1012,20 @@ Type: upgrade`;
         }
       }
 
+      // ── RATE LIMIT: history (free users, 3/day) ────────────────────────
+      if (PREMIUM_ENABLED && !isPremium(user)) {
+        const allowed = await checkLimit(user.id, "history_count");
+        if (!allowed) {
+          reply = `You've checked your history 3 times today — the limit resets tomorrow.
+
+Upgrade for unlimited history access:
+upgrade`;
+          await sendReply(from, reply);
+          return res.sendStatus(200);
+        }
+        await incrementUsage(user.id, "history_count");
+      }
+
       if (historyCarName) {
         const matchedCar = userCars.find(car => car.car_name === historyCarName);
 
@@ -1016,7 +1045,9 @@ Type: upgrade`;
       } else if (command === "month") {
         logs = await getLogsThisMonth(carId);
       } else {
-        logs = await getRecentLogs(carId, 5);
+        // Free users see last 3 logs, premium users see last 5
+        const historyLimit = (PREMIUM_ENABLED && !isPremium(user)) ? 3 : 5;
+        logs = await getRecentLogs(carId, historyLimit);
       }
 
       const activeCar = userCars.find(car => car.id === carId);
@@ -1038,7 +1069,6 @@ Type: upgrade`;
           if (log.type === "fuel") {
             line = `⛽ Fuel — ${log.amount?.toLocaleString()} TZS`;
           } else if (log.type === "maintenance") {
-            // show subtype label if available, otherwise generic
             const label = log.subtype ? subtypeLabel(log.subtype) : null;
             line = `🔧 ${label || "Maintenance"} — ${log.amount?.toLocaleString()} TZS`;
           } else if (log.type === "mileage") {
@@ -1100,6 +1130,20 @@ Type: upgrade`;
       const mileage = extractMileage(text);
 
       if (mileage) {
+        // ── RATE LIMIT: log (free users, 10/day) ────────────────────────
+        if (PREMIUM_ENABLED && !isPremium(user)) {
+          const allowed = await checkLimit(user.id, "log_count");
+          if (!allowed) {
+            reply = `You've reached today's free limit of 10 logs — the limit resets tomorrow.
+
+Upgrade for unlimited logging:
+upgrade`;
+            await sendReply(from, reply);
+            return res.sendStatus(200);
+          }
+          await incrementUsage(user.id, "log_count");
+        }
+
         await saveLog(carId, "mileage", null, `Mileage ${mileage}`, mileage);
         reply = `📏 Mileage logged — ${mileage.toLocaleString()} km`;
       }
@@ -1197,12 +1241,26 @@ Please try again or type "cancel" to go back.`;
     const { type, subtype } = detectType(text);
 
     if (amount && carId && looksLikeLog(text)) {
+
+      // ── RATE LIMIT: log (free users, 10/day) ──────────────────────────
+      if (PREMIUM_ENABLED && !isPremium(user)) {
+        const allowed = await checkLimit(user.id, "log_count");
+        if (!allowed) {
+          reply = `You've reached today's free limit of 10 logs — the limit resets tomorrow.
+
+Upgrade for unlimited logging:
+upgrade`;
+          await sendReply(from, reply);
+          return res.sendStatus(200);
+        }
+        await incrementUsage(user.id, "log_count");
+      }
+
       const { count } = await supabase
         .from("logs")
         .select("*", { count: "exact", head: true })
         .eq("car_id", carId);
 
-      // pass subtype to saveLog
       await saveLog(carId, type, amount, text, null, subtype);
 
       const isFirstLog = count === 0;
@@ -1219,7 +1277,6 @@ Keep going:
         const carUsed = userCars.find(car => car.id === carId);
         const carName = carUsed ? carUsed.car_name : "your car";
 
-        // use subtype label if available for a more specific confirmation
         let typeLabel = "Expense";
         if (type === "fuel") typeLabel = "Fuel";
         else if (type === "insurance") typeLabel = "Insurance";
