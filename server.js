@@ -284,7 +284,61 @@ Type: upgrade`
   }
 
   console.log(`Cron ran: ${warned3} 3-day warnings, ${warned1} 1-day warnings, ${downgraded} downgraded`);
-  return res.status(200).json({ warned3, warned1, downgraded });
+
+  // ── INSURANCE EXPIRY REMINDERS (premium only) ──────────────────────────
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const in30Days  = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+const in7DaysIns = new Date(today.getTime() + 7  * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+const in1DayIns  = new Date(today.getTime() + 1  * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+  const { data: insuranceRecords } = await supabase
+    .from("car_insurance")
+    .select("*, cars (id, car_name, plate_number, car_users (users (phone_number, is_premium, is_lifetime, premium_until)))")
+    .gte("expiry_date", today.toISOString().split("T")[0]);
+
+  let insuranceReminders = 0;
+
+  for (const record of insuranceRecords || []) {
+    const expiry = record.expiry_date;
+    const car = record.cars;
+    if (!car) continue;
+
+    for (const link of car.car_users || []) {
+      const u = link.users;
+      if (!u) continue;
+
+      // Only send reminders to premium users
+      const userIsPremium = u.is_lifetime || (u.is_premium && u.premium_until &&
+        new Date(u.premium_until).getTime() + 3 * 24 * 60 * 60 * 1000 > Date.now());
+
+      if (!userIsPremium) continue;
+
+      if (expiry === in30Days && !record.notified_30d) {
+        await sendReply(u.phone_number,
+          `🔔 Insurance Reminder — ${car.car_name}\n\nYour insurance expires in 30 days (${expiry}).\n\nMake sure to renew on time to stay covered.`
+        );
+        await supabase.from("car_insurance").update({ notified_30d: true }).eq("id", record.id);
+        insuranceReminders++;
+      } else if (expiry === in7DaysIns && !record.notified_7d) {
+        await sendReply(u.phone_number,
+          `⚠️ Insurance Reminder — ${car.car_name}\n\nYour insurance expires in 7 days (${expiry}).\n\nTime to renew if you haven't already.`
+        );
+        await supabase.from("car_insurance").update({ notified_7d: true }).eq("id", record.id);
+        insuranceReminders++;
+      } else if (expiry === in1DayIns && !record.notified_1d) {
+        await sendReply(u.phone_number,
+          `🚨 Insurance Expires Tomorrow — ${car.car_name}\n\nYour insurance expires tomorrow (${expiry}).\n\nPlease renew today to avoid driving uninsured.`
+        );
+        await supabase.from("car_insurance").update({ notified_1d: true }).eq("id", record.id);
+        insuranceReminders++;
+      }
+    }
+  }
+
+  console.log(`Insurance reminders sent: ${insuranceReminders}`);
+  return res.status(200).json({ warned3, warned1, downgraded, insuranceReminders });
 });
 
 // ─── INCOMING MESSAGES ────────────────────────────────────────────────────────
@@ -520,6 +574,396 @@ Or contact us at contact@carlogbook.app for help.`
         await sendReply(from, `❌ Payment rejected for ${targetUser.name} (${targetPhone}). User has been notified.`);
         return res.sendStatus(200);
       }
+
+      // ── ADMIN: DOWNGRADE ────────────────────────────────────────────────
+      if (text.toLowerCase().startsWith("downgrade ")) {
+        const targetPhone = text.split(" ")[1]?.trim();
+
+        if (!targetPhone) {
+          await sendReply(from, `Usage: downgrade 255XXXXXXXXX`);
+          return res.sendStatus(200);
+        }
+
+        const { data: targetUser } = await supabase
+          .from("users")
+          .select("*")
+          .eq("phone_number", targetPhone)
+          .single();
+
+        if (!targetUser) {
+          await sendReply(from, `❌ No user found with phone: ${targetPhone}`);
+          return res.sendStatus(200);
+        }
+
+        await supabase
+          .from("users")
+          .update({
+            is_premium: false,
+            is_lifetime: false,
+            premium_until: null,
+            premium_plan: null,
+            premium_warned_3d: false,
+            premium_warned_1d: false
+          })
+          .eq("phone_number", targetPhone);
+
+        await sendReply(from, `✅ ${targetUser.name} (${targetPhone}) has been downgraded to free.`);
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: EXTEND ───────────────────────────────────────────────────
+      if (text.toLowerCase().startsWith("extend ")) {
+        const targetPhone = text.split(" ")[1]?.trim();
+
+        if (!targetPhone) {
+          await sendReply(from, `Usage: extend 255XXXXXXXXX`);
+          return res.sendStatus(200);
+        }
+
+        const { data: targetUser } = await supabase
+          .from("users")
+          .select("*")
+          .eq("phone_number", targetPhone)
+          .single();
+
+        if (!targetUser) {
+          await sendReply(from, `❌ No user found with phone: ${targetPhone}`);
+          return res.sendStatus(200);
+        }
+
+        if (!targetUser.is_premium) {
+          await sendReply(from, `⚠️ ${targetUser.name} is not a premium user. Use approve instead.`);
+          return res.sendStatus(200);
+        }
+
+        const base = targetUser.premium_until
+          ? new Date(targetUser.premium_until)
+          : new Date();
+        const newExpiry = new Date(base.setMonth(base.getMonth() + 1)).toISOString();
+
+        await supabase
+          .from("users")
+          .update({
+            premium_until: newExpiry,
+            premium_warned_3d: false,
+            premium_warned_1d: false
+          })
+          .eq("phone_number", targetPhone);
+
+        const expiryLabel = new Date(newExpiry).toLocaleDateString("en-GB", {
+          day: "numeric", month: "short", year: "numeric"
+        });
+
+        await sendReply(targetPhone,
+          `⭐ Good news! Your Car Logbook Premium has been extended.\n\nNew expiry: ${expiryLabel}\n\nThank you for being a valued member! 🙏`
+        );
+
+        await sendReply(from, `✅ ${targetUser.name} (${targetPhone}) extended by 1 month. New expiry: ${expiryLabel}`);
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: USER LOOKUP ──────────────────────────────────────────────
+      if (text.toLowerCase().startsWith("user ")) {
+        const targetPhone = text.split(" ")[1]?.trim();
+
+        if (!targetPhone) {
+          await sendReply(from, `Usage: user 255XXXXXXXXX`);
+          return res.sendStatus(200);
+        }
+
+        const { data: targetUser } = await supabase
+          .from("users")
+          .select("*")
+          .eq("phone_number", targetPhone)
+          .single();
+
+        if (!targetUser) {
+          await sendReply(from, `❌ No user found with phone: ${targetPhone}`);
+          return res.sendStatus(200);
+        }
+
+        const { data: userCarLinks } = await supabase
+          .from("car_users")
+          .select("car_id, cars (car_name, plate_number)")
+          .eq("user_id", targetUser.id);
+
+        const { count: totalLogs } = await supabase
+          .from("logs")
+          .select("*", { count: "exact", head: true })
+          .in("car_id", (userCarLinks || []).map(l => l.car_id));
+
+        const joined = new Date(targetUser.created_at).toLocaleDateString("en-GB", {
+          day: "numeric", month: "short", year: "numeric"
+        });
+
+        let planStatus = "Free";
+        if (targetUser.is_lifetime) {
+          planStatus = "Lifetime ⭐";
+        } else if (targetUser.is_premium && targetUser.premium_until) {
+          const expiry = new Date(targetUser.premium_until).toLocaleDateString("en-GB", {
+            day: "numeric", month: "short", year: "numeric"
+          });
+          planStatus = `Premium (${targetUser.premium_plan || "monthly"}) — expires ${expiry}`;
+        }
+
+        const carList = (userCarLinks || [])
+          .map(l => `  • ${l.cars.car_name} (${l.cars.plate_number})`)
+          .join("\n") || "  None";
+
+        await sendReply(from,
+`👤 User Lookup
+
+Name: ${targetUser.name}
+Phone: ${targetPhone}
+Joined: ${joined}
+Plan: ${planStatus}
+Cars: ${userCarLinks?.length || 0}
+${carList}
+Total logs: ${totalLogs || 0}`
+        );
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: CAR LOOKUP ───────────────────────────────────────────────
+      if (text.toLowerCase().startsWith("car ")) {
+        const plateRaw = text.split(" ")[1]?.trim().toUpperCase().replace(/\s+/g, "");
+
+        if (!plateRaw) {
+          await sendReply(from, `Usage: car T123ABC`);
+          return res.sendStatus(200);
+        }
+
+        const { data: carData } = await supabase
+          .from("cars")
+          .select("*")
+          .eq("plate_number", plateRaw)
+          .single();
+
+        if (!carData) {
+          await sendReply(from, `❌ No car found with plate: ${plateRaw}`);
+          return res.sendStatus(200);
+        }
+
+        const { data: owners } = await supabase
+          .from("car_users")
+          .select("user_id, users (name, phone_number)")
+          .eq("car_id", carData.id);
+
+        const { count: totalLogs } = await supabase
+          .from("logs")
+          .select("*", { count: "exact", head: true })
+          .eq("car_id", carData.id);
+
+        const { data: lastMileage } = await supabase
+          .from("logs")
+          .select("mileage, created_at")
+          .eq("car_id", carData.id)
+          .eq("type", "mileage")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .single();
+
+        const { data: lastFuel } = await supabase
+          .from("logs")
+          .select("amount, created_at")
+          .eq("car_id", carData.id)
+          .eq("type", "fuel")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .single();
+
+        const ownerList = (owners || [])
+          .map(o => `  • ${o.users.name} (${o.users.phone_number})`)
+          .join("\n") || "  None";
+
+        const lastMileageStr = lastMileage
+          ? `${lastMileage.mileage?.toLocaleString()} km`
+          : "No mileage logged";
+
+        const lastFuelStr = lastFuel
+          ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(lastFuel.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`
+          : "No fuel logged";
+
+        await sendReply(from,
+`🚗 Car Lookup
+
+Plate: ${carData.plate_number}
+Name: ${carData.car_name}
+Registered: ${new Date(carData.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+
+Owners:
+${ownerList}
+
+Total logs: ${totalLogs || 0}
+Last mileage: ${lastMileageStr}
+Last fuel: ${lastFuelStr}`
+        );
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: PENDING PAYMENTS ─────────────────────────────────────────
+      if (text.toLowerCase() === "pending") {
+        const { data: pendingPayments } = await supabase
+          .from("payments")
+          .select("*, users (name, phone_number)")
+          .eq("status", "pending")
+          .order("created_at", { ascending: false });
+
+        if (!pendingPayments || !pendingPayments.length) {
+          await sendReply(from, `✅ No pending payments right now.`);
+          return res.sendStatus(200);
+        }
+
+        let msg = `💰 Pending Payments (${pendingPayments.length})\n\n`;
+        pendingPayments.forEach((p, i) => {
+          const date = new Date(p.created_at).toLocaleDateString("en-GB", {
+            day: "numeric", month: "short"
+          });
+          msg += `${i + 1}. ${p.users.name} (${p.users.phone_number})\n`;
+          msg += `   TID: ${p.transaction_id}\n`;
+          msg += `   Submitted: ${date}\n\n`;
+        });
+
+        msg += `To approve:\napprove 255XXXXXXXXX\napprove 255XXXXXXXXX annual`;
+        await sendReply(from, msg);
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: RECENT PAYMENTS ──────────────────────────────────────────
+      if (text.toLowerCase() === "payments") {
+        const { data: recentPayments } = await supabase
+          .from("payments")
+          .select("*, users (name, phone_number)")
+          .eq("status", "approved")
+          .order("created_at", { ascending: false })
+          .limit(10);
+
+        if (!recentPayments || !recentPayments.length) {
+          await sendReply(from, `No approved payments yet.`);
+          return res.sendStatus(200);
+        }
+
+        let msg = `✅ Recent Payments (last ${recentPayments.length})\n\n`;
+        recentPayments.forEach((p, i) => {
+          const date = new Date(p.created_at).toLocaleDateString("en-GB", {
+            day: "numeric", month: "short", year: "numeric"
+          });
+          const planStr = p.plan ? ` — ${p.plan}` : "";
+          const amountStr = p.amount ? ` (${p.amount.toLocaleString()} TZS)` : "";
+          msg += `${i + 1}. ${p.users.name} (${p.users.phone_number})\n`;
+          msg += `   ${date}${planStr}${amountStr}\n\n`;
+        });
+
+        await sendReply(from, msg);
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: STATS ────────────────────────────────────────────────────
+      if (text.toLowerCase() === "stats") {
+        const { count: totalUsers } = await supabase
+          .from("users")
+          .select("*", { count: "exact", head: true });
+
+        const { count: premiumUsers } = await supabase
+          .from("users")
+          .select("*", { count: "exact", head: true })
+          .eq("is_premium", true);
+
+        const { count: totalLogs } = await supabase
+          .from("logs")
+          .select("*", { count: "exact", head: true });
+
+        const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { count: newUsersThisWeek } = await supabase
+          .from("users")
+          .select("*", { count: "exact", head: true })
+          .gte("created_at", oneWeekAgo);
+
+        const { count: pendingCount } = await supabase
+          .from("payments")
+          .select("*", { count: "exact", head: true })
+          .eq("status", "pending");
+
+        await sendReply(from,
+`📊 Car Logbook Stats
+
+👥 Total users: ${totalUsers || 0}
+⭐ Premium users: ${premiumUsers || 0}
+🆕 New this week: ${newUsersThisWeek || 0}
+📋 Total logs: ${totalLogs || 0}
+💰 Pending payments: ${pendingCount || 0}`
+        );
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: BROADCAST ────────────────────────────────────────────────
+      if (text.toLowerCase().startsWith("broadcast ")) {
+        const broadcastMessage = text.slice(10).trim();
+
+        if (!broadcastMessage) {
+          await sendReply(from, `Usage: broadcast <your message>`);
+          return res.sendStatus(200);
+        }
+
+        const { data: allUsers } = await supabase
+          .from("users")
+          .select("phone_number, name");
+
+        if (!allUsers || !allUsers.length) {
+          await sendReply(from, `No users to broadcast to.`);
+          return res.sendStatus(200);
+        }
+
+        await sendReply(from, `📡 Sending broadcast to ${allUsers.length} users...`);
+
+        let sent = 0;
+        let failed = 0;
+        for (const u of allUsers) {
+          try {
+            await sendReply(u.phone_number, broadcastMessage);
+            sent++;
+          } catch (e) {
+            console.error(`Broadcast failed for ${u.phone_number}:`, e.message);
+            failed++;
+          }
+        }
+
+        await sendReply(from, `✅ Broadcast complete.\nSent: ${sent}\nFailed: ${failed}`);
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: HELP ─────────────────────────────────────────────────────
+      if (text.toLowerCase() === "admin help") {
+        await sendReply(from,
+`🛠 Admin Commands
+
+Payments:
+• approve 255X — monthly premium
+• approve 255X annual — annual premium
+• reject 255X — reject payment
+• pending — list pending payments
+• payments — last 10 approved
+
+Users:
+• user 255X — full user status
+• downgrade 255X — remove premium
+• extend 255X — add 1 month
+
+Lookups:
+• car T123ABC — car info + owner
+
+Stats:
+• stats — platform snapshot
+
+Broadcast:
+• broadcast <msg> — send to all users
+
+EWURA (coming soon):
+• ewura petrol 3250 diesel 3100 kerosene 2800`
+        );
+        return res.sendStatus(200);
+      }
+
     }
 
     const userCars = await getUserCars(user.id);
@@ -1137,6 +1581,65 @@ upgrade`;
       return res.sendStatus(200);
     }
 
+    // ── INSURANCE EXPIRY ──────────────────────────────────────────────────
+    if (text.toLowerCase().startsWith("insurance expiry ")) {
+      if (!carId) {
+        reply = `You need to have a car registered to set an insurance expiry date.\n\nType: cars`;
+        await sendReply(from, reply);
+        return res.sendStatus(200);
+      }
+
+      const datePart = text.slice(17).trim();
+      const parsed = new Date(datePart);
+
+      if (isNaN(parsed.getTime())) {
+        reply = `I couldn't read that date. Please use a clear format.\n\nExamples:\ninsurance expiry 15 Aug 2026\ninsurance expiry 2026-08-15`;
+        await sendReply(from, reply);
+        return res.sendStatus(200);
+      }
+
+      const expiryDate = parsed.toISOString().split("T")[0];
+
+      // upsert — one record per car
+      const { data: existing } = await supabase
+        .from("car_insurance")
+        .select("id")
+        .eq("car_id", carId)
+        .single();
+
+      if (existing) {
+        await supabase
+          .from("car_insurance")
+          .update({
+            expiry_date: expiryDate,
+            notified_30d: false,
+            notified_7d: false,
+            notified_1d: false
+          })
+          .eq("car_id", carId);
+      } else {
+        await supabase
+          .from("car_insurance")
+          .insert({ car_id: carId, expiry_date: expiryDate });
+      }
+
+      const activeCar = userCars.find(car => car.id === carId);
+      const carName = activeCar ? activeCar.car_name : "your car";
+
+      const displayDate = parsed.toLocaleDateString("en-GB", {
+        day: "numeric", month: "short", year: "numeric"
+      });
+
+      reply = `✅ Insurance expiry saved for ${carName}.
+
+Expiry date: ${displayDate}${PREMIUM_ENABLED && !isPremium(user)
+  ? "\n\nReminders at 30, 7, and 1 day before expiry are a Premium feature.\n\nType: upgrade"
+  : "\n\nI'll remind you 30 days, 7 days, and 1 day before it expires."}`;
+
+      await sendReply(from, reply);
+      return res.sendStatus(200);
+    }
+
     // ── PLATE NUMBER DETECTED ─────────────────────────────────────────────
     if (isPlateNumber(text)) {
       const plate = text.trim().replace(/\s+/g, "").toUpperCase();
@@ -1328,6 +1831,20 @@ feedback <your message>`;
 
 Car: ${carName}
 ${typeLabel}: ${amount.toLocaleString()} TZS`;
+        }
+
+        // ── POST-INSURANCE EXPIRY PROMPT ───────────────────────────────
+        // Only prompt if this was an insurance log and no expiry date is set yet
+        if (type === "insurance") {
+          const { data: existingInsurance } = await supabase
+            .from("car_insurance")
+            .select("id")
+            .eq("car_id", carId)
+            .single();
+
+          if (!existingInsurance) {
+            reply += `\n\nWould you like to set a reminder for when it expires?\n\nJust send the date:\ninsurance expiry 15 Aug 2026`;
+          }
         }
       }
 
