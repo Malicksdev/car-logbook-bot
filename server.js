@@ -14,6 +14,7 @@ const supabase = require("./config/supabase");
 const TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const ADMIN_PHONE = process.env.ADMIN_PHONE;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 // Set to true to enforce free vs premium restrictions
 const PREMIUM_ENABLED = false;
@@ -23,8 +24,11 @@ const app = express();
 app.use(express.json());
 app.use(bodyParser.urlencoded({ extended: false }));
 
+// ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
+
 function isPlateNumber(text) {
-  return /^T[0-9]{3}[A-Z]{3}$/i.test(text.trim());
+  // strip spaces before validating e.g. "T 123 ABC" → "T123ABC"
+  return /^T[0-9]{3}[A-Z]{3}$/i.test(text.trim().replace(/\s+/g, ""));
 }
 
 function isMileage(text) {
@@ -38,9 +42,10 @@ function isMileage(text) {
 }
 
 function extractMileage(text) {
-  const match = text.match(/\d+/);
+  // FIX: strip commas so 100,000 is parsed as 100000 not 100
+  const match = text.match(/[\d,]+/);
   if (!match) return null;
-  return parseInt(match[0]);
+  return parseInt(match[0].replace(/,/g, ""));
 }
 
 function isPremium(user) {
@@ -56,6 +61,99 @@ function isActivePremiumUser(user) {
   if (!user.premium_until) return true;
   const gracePeriodMs = 3 * 24 * 60 * 60 * 1000;
   return new Date(user.premium_until).getTime() + gracePeriodMs > Date.now();
+}
+
+// Check if message looks like a log (has known keywords)
+// Used to prevent SMS dumps and random long messages being parsed as logs
+function looksLikeLog(text) {
+  const lower = text.toLowerCase();
+  const logKeywords = [
+    "fuel", "mafuta", "oil", "service", "brake",
+    "insurance", "mileage", "km", "kms", "miles",
+    "maintenance", "repair", "tyre", "tire", "wash"
+  ];
+  return logKeywords.some(k => lower.includes(k));
+}
+
+// ─── AI FUNCTIONS ─────────────────────────────────────────────────────────────
+
+// Extract transaction ID from any mobile money SMS format
+async function extractTransactionId(smsText) {
+  try {
+    const response = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 100,
+        messages: [
+          {
+            role: "user",
+            content: `Extract the transaction ID from this mobile money SMS confirmation. Return ONLY the transaction ID, nothing else. If you cannot find a transaction ID, return the word "NONE".
+
+SMS: ${smsText}`
+          }
+        ]
+      },
+      {
+        headers: {
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    const result = response.data.content[0].text.trim();
+    return result === "NONE" ? null : result;
+
+  } catch (error) {
+    console.error("AI TID extraction error:", error.message);
+    return null;
+  }
+}
+
+// Smart fallback — Claude responds helpfully when bot doesn't understand
+async function getAIFallbackReply(userMessage, userName, userCars) {
+  try {
+    const carList = userCars.length
+      ? userCars.map(c => c.car_name).join(", ")
+      : "no cars registered yet";
+
+    const response = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 300,
+        messages: [
+          {
+            role: "user",
+            content: `You are a helpful WhatsApp assistant for Car Logbook, a car expense tracking bot in Tanzania. 
+            
+The user's name is ${userName} and they have these cars: ${carList}.
+
+The bot supports these commands: fuel logging (e.g. "fuel 40k"), maintenance (e.g. "oil change 120k"), mileage (e.g. "mileage 30402"), insurance (e.g. "insurance 200k"), history, cars, add car, switch to <car>, undo, upgrade, feedback.
+
+The user sent a message the bot didn't understand. Respond helpfully and conversationally in 2-3 sentences maximum. Guide them toward what they probably meant or show them the right command. Be warm and friendly. Do not use markdown formatting. If the message appears to be in Swahili, respond acknowledging that and guide them in English for now.
+
+User message: "${userMessage}"`
+          }
+        ]
+      },
+      {
+        headers: {
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    return response.data.content[0].text.trim();
+
+  } catch (error) {
+    console.error("AI fallback error:", error.message);
+    return null;
+  }
 }
 
 // ─── WEBHOOK VERIFICATION ─────────────────────────────────────────────────────
@@ -194,6 +292,30 @@ app.post("/whatsapp", async (req, res) => {
     if (!message) return res.sendStatus(200);
 
     const from = message.from;
+    const messageId = message.id;
+
+    // ── DEDUPLICATION ────────────────────────────────────────────────────────
+    // Prevents duplicate processing when Render wakes up from sleep
+    try {
+      const { data: existing } = await supabase
+        .from("processed_messages")
+        .select("message_id")
+        .eq("message_id", messageId)
+        .single();
+
+      if (existing) {
+        console.log("Duplicate message ignored:", messageId);
+        return res.sendStatus(200);
+      }
+
+      await supabase
+        .from("processed_messages")
+        .insert({ message_id: messageId });
+
+    } catch (dedupError) {
+      // if dedup check fails, continue processing rather than blocking the message
+      console.error("Dedup error:", dedupError.message);
+    }
 
     // Handle photo messages
     if (message.image) {
@@ -217,7 +339,7 @@ app.post("/whatsapp", async (req, res) => {
     const { user, isNewUser } = await getOrCreateUser(from, contactName);
     let reply = "";
 
-    // ── BRAND NEW USER ──────────────────────────────────────────────────────
+    // ── BRAND NEW USER ────────────────────────────────────────────────────
     if (isNewUser) {
       reply = `👋 Welcome to Car Logbook, ${user.name}!
 
@@ -233,15 +355,44 @@ Example: T123ABC`;
       return res.sendStatus(200);
     }
 
-    // ── CANCEL COMMAND ──────────────────────────────────────────────────────
+    // ── CANCEL COMMAND ────────────────────────────────────────────────────
     if (text.toLowerCase() === "cancel") {
-      await supabase.from("users").update({ pending_plate: null }).eq("id", user.id);
+      await supabase
+        .from("users")
+        .update({ pending_plate: null })
+        .eq("id", user.id);
+
       reply = `Okay, cancelled. What would you like to do?\n\nType "help" to see all commands.`;
       await sendReply(from, reply);
       return res.sendStatus(200);
     }
 
-    // ── ADMIN COMMANDS ──────────────────────────────────────────────────────
+    // ── CANCEL PAYMENT ────────────────────────────────────────────────────
+    if (text.toLowerCase() === "cancel payment") {
+      const { data: pendingPayment } = await supabase
+        .from("payments")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("status", "pending")
+        .single();
+
+      if (!pendingPayment) {
+        reply = `You don't have any pending payments to cancel.`;
+        await sendReply(from, reply);
+        return res.sendStatus(200);
+      }
+
+      await supabase
+        .from("payments")
+        .delete()
+        .eq("id", pendingPayment.id);
+
+      reply = `✅ Your pending payment (${pendingPayment.transaction_id}) has been cancelled.\n\nIf you'd like to try again, type: upgrade`;
+      await sendReply(from, reply);
+      return res.sendStatus(200);
+    }
+
+    // ── ADMIN COMMANDS ────────────────────────────────────────────────────
     if (from === ADMIN_PHONE) {
 
       if (text.toLowerCase().startsWith("approve ")) {
@@ -381,7 +532,7 @@ Or contact us at contact@carlogbook.app for help.`
       carId = detectedCars[0].id;
     }
 
-    // ── START ──────────────────────────────────────────────────────────────
+    // ── START ─────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "start") {
       reply = `🚗 Car Logbook
 
@@ -401,7 +552,7 @@ Type "help" anytime you need a reminder.
       return res.sendStatus(200);
     }
 
-    // ── GREETINGS ──────────────────────────────────────────────────────────
+    // ── GREETINGS ─────────────────────────────────────────────────────────
     const greetings = ["hi", "hello", "hey", "mambo"];
 
     if (greetings.includes(text.toLowerCase())) {
@@ -430,7 +581,7 @@ Type "help" to see all commands.`;
       return res.sendStatus(200);
     }
 
-    // ── HELP ───────────────────────────────────────────────────────────────
+    // ── HELP ──────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "help") {
       reply = `🚗 Car Logbook — Quick Guide
 
@@ -464,7 +615,7 @@ Tip: If you have multiple cars, include the car name in your message so I know w
       return res.sendStatus(200);
     }
 
-    // ── FEEDBACK COMMAND ───────────────────────────────────────────────────
+    // ── FEEDBACK COMMAND ──────────────────────────────────────────────────
     if (text.toLowerCase().startsWith("feedback ")) {
       const feedbackMessage = text.slice(9).trim();
 
@@ -474,13 +625,11 @@ Tip: If you have multiple cars, include the car name in your message so I know w
         return res.sendStatus(200);
       }
 
-      // save to Supabase
       await supabase.from("feedback").insert({
         user_id: user.id,
         message: feedbackMessage
       });
 
-      // forward to admin
       await sendReply(
         ADMIN_PHONE,
         `💬 User Feedback
@@ -500,7 +649,7 @@ We read every message and use it to make Car Logbook better.`;
       return res.sendStatus(200);
     }
 
-    // ── UPGRADE COMMAND ────────────────────────────────────────────────────
+    // ── UPGRADE COMMAND ───────────────────────────────────────────────────
     if (text.toLowerCase() === "upgrade") {
 
       if (isActivePremiumUser(user)) {
@@ -542,6 +691,8 @@ How to upgrade:
 2. After paying, send:
    paid <transaction_id>
 
+   Or paste your full SMS confirmation and I'll find the ID automatically.
+
    Example:
    paid QHG72K3
 ─────────────────
@@ -554,9 +705,37 @@ contact@carlogbook.app`;
       return res.sendStatus(200);
     }
 
-    // ── PAID COMMAND ───────────────────────────────────────────────────────
+    // ── PAID COMMAND ──────────────────────────────────────────────────────
     if (text.toLowerCase().startsWith("paid ")) {
-      const txnId = text.split(" ")[1]?.trim().toUpperCase();
+      const rawText = text.slice(5).trim();
+
+      // FIX: AI extracts TID from any SMS format, fallback to first word
+      let txnId = null;
+
+      const words = rawText.split(" ");
+      if (words.length <= 2) {
+        // short message — user typed ID manually
+        txnId = words[0].trim().toUpperCase();
+      } else {
+        // long message — likely a pasted SMS, use AI to extract
+        console.log("Extracting TID from SMS via AI...");
+        const extracted = await extractTransactionId(rawText);
+        if (extracted) {
+          txnId = extracted.toUpperCase();
+          console.log("AI extracted TID:", txnId);
+        } else {
+          // AI couldn't find it — ask user to type manually
+          reply = `I couldn't find a transaction ID in that message.
+
+Please send just the transaction ID:
+
+paid QHG72K3
+
+Or contact us at contact@carlogbook.app if you need help.`;
+          await sendReply(from, reply);
+          return res.sendStatus(200);
+        }
+      }
 
       if (!txnId) {
         reply = `Please include your transaction ID.\n\nExample:\npaid QHG72K3`;
@@ -576,7 +755,9 @@ contact@carlogbook.app`;
 
 We'll notify you once it's verified. This usually takes a few hours.
 
-Questions? Contact us at contact@carlogbook.app`;
+Made a mistake? Type: cancel payment
+
+Questions? contact@carlogbook.app`;
         await sendReply(from, reply);
         return res.sendStatus(200);
       }
@@ -619,6 +800,8 @@ Transaction ID: ${txnId}
 
 You'll receive a confirmation message shortly.
 
+Made a mistake? Type: cancel payment
+
 Questions? contact@carlogbook.app`;
       await sendReply(from, reply);
 
@@ -640,7 +823,7 @@ reject ${from}`
       return res.sendStatus(200);
     }
 
-    // ── CARS ───────────────────────────────────────────────────────────────
+    // ── CARS ──────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "cars") {
       const cars = await getUserCars(user.id);
 
@@ -648,11 +831,58 @@ reject ${from}`
         reply = `🚗 You haven't added any cars yet.\n\nSend your plate number to get started.\n\nExample: T123ABC`;
       } else {
         let messageText = "🚗 Your Cars\n\n";
-        cars.forEach(car => {
+
+        for (const car of cars) {
           const isActive = car.id === carId;
+
+          // fetch last fuel log
+          const { data: lastFuel } = await supabase
+            .from("logs")
+            .select("amount, created_at")
+            .eq("car_id", car.id)
+            .eq("type", "fuel")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .single();
+
+          // fetch last mileage log
+          const { data: lastMileage } = await supabase
+            .from("logs")
+            .select("mileage, created_at")
+            .eq("car_id", car.id)
+            .eq("type", "mileage")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .single();
+
+          // fetch total log count
+          const { count: totalLogs } = await supabase
+            .from("logs")
+            .select("*", { count: "exact", head: true })
+            .eq("car_id", car.id);
+
           messageText += `${isActive ? "▶" : "•"} ${car.car_name} — ${car.plate_number}${isActive ? " (active)" : ""}\n`;
-        });
-        messageText += `\nTo log against a specific car:\nfuel 40k rav4\n\n`;
+
+          if (lastMileage) {
+            messageText += `   📏 ${lastMileage.mileage?.toLocaleString()} km\n`;
+          }
+
+          if (lastFuel) {
+            const fuelDate = new Date(lastFuel.created_at).toLocaleDateString("en-GB", {
+              day: "numeric",
+              month: "short"
+            });
+            messageText += `   ⛽ ${lastFuel.amount?.toLocaleString()} TZS (${fuelDate})\n`;
+          }
+
+          if (totalLogs > 0) {
+            messageText += `   📋 ${totalLogs} log${totalLogs === 1 ? "" : "s"} total\n`;
+          }
+
+          messageText += "\n";
+        }
+
+        messageText += `To log against a specific car:\nfuel 40k rav4\n\n`;
         messageText += `To switch active car:\nswitch to rav4\n\n`;
         messageText += `➕ Add another car: add car`;
         reply = messageText;
@@ -662,7 +892,7 @@ reject ${from}`
       return res.sendStatus(200);
     }
 
-    // ── ADD CAR ────────────────────────────────────────────────────────────
+    // ── ADD CAR ───────────────────────────────────────────────────────────
     if (text.toLowerCase() === "add car") {
 
       if (PREMIUM_ENABLED && userCars.length >= 1 && !isPremium(user)) {
@@ -692,7 +922,7 @@ Example: T456DEF`;
       return res.sendStatus(200);
     }
 
-    // ── SWITCH ACTIVE CAR ──────────────────────────────────────────────────
+    // ── SWITCH ACTIVE CAR ─────────────────────────────────────────────────
     const switchPhrases = ["switch to ", "use ", "change to "];
     const switchMatch = switchPhrases.find(p => text.toLowerCase().startsWith(p));
 
@@ -729,7 +959,7 @@ mileage 30402`;
       return res.sendStatus(200);
     }
 
-    // ── UNDO ───────────────────────────────────────────────────────────────
+    // ── UNDO ──────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "undo") {
       if (!carId) {
         reply = `Hmm, I couldn't find a car to undo a log for.\n\nMake sure you have a car registered:\ncars`;
@@ -746,7 +976,7 @@ mileage 30402`;
       return res.sendStatus(200);
     }
 
-    // ── HISTORY ────────────────────────────────────────────────────────────
+    // ── HISTORY ───────────────────────────────────────────────────────────
     if (text.toLowerCase().startsWith("history")) {
       const parts = text.toLowerCase().split(" ");
 
@@ -853,9 +1083,10 @@ Type: upgrade`;
       return res.sendStatus(200);
     }
 
-    // ── PLATE NUMBER DETECTED ──────────────────────────────────────────────
+    // ── PLATE NUMBER DETECTED ─────────────────────────────────────────────
     if (isPlateNumber(text)) {
-      const plate = text.toUpperCase();
+      // FIX: strip spaces from plate before saving e.g. "T 123 ABC" → "T123ABC"
+      const plate = text.trim().replace(/\s+/g, "").toUpperCase();
 
       await supabase
         .from("users")
@@ -868,7 +1099,7 @@ Type: upgrade`;
       return res.sendStatus(200);
     }
 
-    // ── MILEAGE LOG ────────────────────────────────────────────────────────
+    // ── MILEAGE LOG ───────────────────────────────────────────────────────
     if (isMileage(text) && carId) {
       const mileage = extractMileage(text);
 
@@ -881,7 +1112,7 @@ Type: upgrade`;
       return res.sendStatus(200);
     }
 
-    // ── CAR NAME STEP (after plate) ────────────────────────────────────────
+    // ── CAR NAME STEP (after plate) ───────────────────────────────────────
     if (user.pending_plate && user.pending_plate !== "AWAITING") {
       const carName = text.trim().toLowerCase();
       const plate = user.pending_plate;
@@ -940,7 +1171,7 @@ Type "help" anytime you need a reminder.${isFirstCar ? "\n\nTip: You can add mor
       return res.sendStatus(200);
     }
 
-    // ── AWAITING PLATE (after "add car" command) ───────────────────────────
+    // ── AWAITING PLATE (after "add car" command) ──────────────────────────
     if (user.pending_plate === "AWAITING") {
       if (!isPlateNumber(text)) {
         reply = `That doesn't look like a valid plate number.
@@ -952,7 +1183,8 @@ Please try again or type "cancel" to go back.`;
         return res.sendStatus(200);
       }
 
-      const plate = text.toUpperCase();
+      // FIX: strip spaces from plate
+      const plate = text.trim().replace(/\s+/g, "").toUpperCase();
 
       await supabase
         .from("users")
@@ -965,11 +1197,13 @@ Please try again or type "cancel" to go back.`;
       return res.sendStatus(200);
     }
 
-    // ── EXPENSE LOG ────────────────────────────────────────────────────────
+    // ── EXPENSE LOG ───────────────────────────────────────────────────────
     const amount = parseAmount(text);
     const type = detectType(text);
 
-    if (amount && carId) {
+    // FIX: only try to log if message looks like a log
+    // Prevents SMS dumps and random long messages being saved as logs
+    if (amount && carId && looksLikeLog(text)) {
       const { count } = await supabase
         .from("logs")
         .select("*", { count: "exact", head: true })
@@ -1020,8 +1254,15 @@ ${typeLabel}: ${amount.toLocaleString()} TZS`;
       return res.sendStatus(200);
     }
 
-    // ── FALLBACK ───────────────────────────────────────────────────────────
-    reply = `Hmm, I didn't quite get that. 🤔
+    // ── AI SMART FALLBACK ─────────────────────────────────────────────────
+    // When bot doesn't understand, Claude tries to help
+    const aiReply = await getAIFallbackReply(text, user.name, userCars);
+
+    if (aiReply) {
+      reply = aiReply;
+    } else {
+      // AI failed — use static fallback
+      reply = `Hmm, I didn't quite get that. 🤔
 
 Here are some things you can try:
 
@@ -1035,6 +1276,7 @@ Or type "help" for the full guide.
 
 💬 Something not working as expected?
 feedback <your message>`;
+    }
 
     await sendReply(from, reply);
     res.sendStatus(200);
