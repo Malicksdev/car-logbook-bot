@@ -6,7 +6,7 @@ const bodyParser = require("body-parser");
 const { getOrCreateUser } = require("./services/userService");
 const { registerCar, getUserCars, setActiveCar } = require("./services/carService");
 const { saveLog, getRecentLogs, getLogsThisMonth, deleteLastLog } = require("./services/logService");
-const { parseAmount, detectType } = require("./utils/parser");
+const { parseAmount, detectType, looksLikeLog } = require("./utils/parser");
 const { sendReply } = require("./utils/sendReply");
 
 const supabase = require("./config/supabase");
@@ -27,7 +27,6 @@ app.use(bodyParser.urlencoded({ extended: false }));
 // ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 
 function isPlateNumber(text) {
-  // strip spaces before validating e.g. "T 123 ABC" → "T123ABC"
   return /^T[0-9]{3}[A-Z]{3}$/i.test(text.trim().replace(/\s+/g, ""));
 }
 
@@ -42,7 +41,6 @@ function isMileage(text) {
 }
 
 function extractMileage(text) {
-  // FIX: strip commas so 100,000 is parsed as 100000 not 100
   const match = text.match(/[\d,]+/);
   if (!match) return null;
   return parseInt(match[0].replace(/,/g, ""));
@@ -63,21 +61,28 @@ function isActivePremiumUser(user) {
   return new Date(user.premium_until).getTime() + gracePeriodMs > Date.now();
 }
 
-// Check if message looks like a log (has known keywords)
-// Used to prevent SMS dumps and random long messages being parsed as logs
-function looksLikeLog(text) {
-  const lower = text.toLowerCase();
-  const logKeywords = [
-    "fuel", "mafuta", "oil", "service", "brake",
-    "insurance", "mileage", "km", "kms", "miles",
-    "maintenance", "repair", "tyre", "tire", "wash"
-  ];
-  return logKeywords.some(k => lower.includes(k));
+// Human-readable subtype labels for history display
+function subtypeLabel(subtype) {
+  const labels = {
+    engine_oil:   "Engine Oil",
+    oil_filter:   "Oil Filter",
+    fuel_filter:  "Fuel Filter",
+    air_filter:   "Air Cleaner/Filter",
+    coolant:      "Coolant",
+    gearbox_oil:  "Gearbox Oil",
+    hydraulic:    "Hydraulic Fluid",
+    battery:      "Battery",
+    tyre:         "Tyres",
+    wiper:        "Wiper Blades",
+    brake:        "Brakes",
+    wash:         "Car Wash",
+    service:      "Service"
+  };
+  return labels[subtype] || null;
 }
 
 // ─── AI FUNCTIONS ─────────────────────────────────────────────────────────────
 
-// Extract transaction ID from any mobile money SMS format
 async function extractTransactionId(smsText) {
   try {
     const response = await axios.post(
@@ -112,8 +117,7 @@ SMS: ${smsText}`
   }
 }
 
-// Smart fallback — Claude responds helpfully when bot doesn't understand
-async function getAIFallbackReply(userMessage, userName, userCars) {
+async function getAIFallbackReply(userMessage, userCars) {
   try {
     const carList = userCars.length
       ? userCars.map(c => c.car_name).join(", ")
@@ -127,13 +131,13 @@ async function getAIFallbackReply(userMessage, userName, userCars) {
         messages: [
           {
             role: "user",
-            content: `You are a helpful WhatsApp assistant for Car Logbook, a car expense tracking bot in Tanzania. 
-            
-The user's name is ${userName} and they have these cars: ${carList}.
+            content: `You are a helpful WhatsApp assistant for Car Logbook, a car expense tracking bot in Tanzania.
 
-The bot supports these commands: fuel logging (e.g. "fuel 40k"), maintenance (e.g. "oil change 120k"), mileage (e.g. "mileage 30402"), insurance (e.g. "insurance 200k"), history, cars, add car, switch to <car>, undo, upgrade, feedback.
+The user has these cars: ${carList}.
 
-The user sent a message the bot didn't understand. Respond helpfully and conversationally in 2-3 sentences maximum. Guide them toward what they probably meant or show them the right command. Be warm and friendly. Do not use markdown formatting. If the message appears to be in Swahili, respond acknowledging that and guide them in English for now.
+The bot supports these commands: fuel logging (e.g. "fuel 40k"), maintenance (e.g. "oil change 120k", "air cleaner 30k", "battery 80k", "tyre 150k"), mileage (e.g. "mileage 30402"), insurance (e.g. "insurance 200k"), history, cars, add car, switch to <car>, undo, upgrade, feedback.
+
+The user sent a message the bot didn't understand. Respond helpfully and conversationally. Keep your response under 3 sentences. Do not greet the user by name. Guide them toward what they probably meant or show them the right command. Be warm and friendly. Do not use markdown formatting. If the message appears to be in Swahili, respond acknowledging that and guide them in English for now.
 
 User message: "${userMessage}"`
           }
@@ -294,8 +298,7 @@ app.post("/whatsapp", async (req, res) => {
     const from = message.from;
     const messageId = message.id;
 
-    // ── DEDUPLICATION ────────────────────────────────────────────────────────
-    // Prevents duplicate processing when Render wakes up from sleep
+    // ── DEDUPLICATION ──────────────────────────────────────────────────────
     try {
       const { data: existing } = await supabase
         .from("processed_messages")
@@ -313,7 +316,6 @@ app.post("/whatsapp", async (req, res) => {
         .insert({ message_id: messageId });
 
     } catch (dedupError) {
-      // if dedup check fails, continue processing rather than blocking the message
       console.error("Dedup error:", dedupError.message);
     }
 
@@ -326,7 +328,6 @@ app.post("/whatsapp", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Ignore non-text messages
     if (!message.text) return res.sendStatus(200);
 
     const text = message.text.body.trim();
@@ -587,11 +588,12 @@ Type "help" to see all commands.`;
 
 Logging:
 ⛽ fuel 40k
-⛽ fuel 40k rav4
 🔧 oil change 120k
-🔧 service 80k
+🔧 air cleaner 30k
+🔧 battery 80k
+🔧 tyre 150k
 📏 mileage 30402
-💰 insurance 200k
+💰 insurance 1.2M
 
 History:
 📒 history
@@ -609,7 +611,7 @@ Other:
 ⭐ upgrade → go Premium
 💬 feedback <message> → send us feedback
 
-Tip: If you have multiple cars, include the car name in your message so I know which one to log against.`;
+Tip: Just type what you did naturally — I'll figure out the rest!`;
 
       await sendReply(from, reply);
       return res.sendStatus(200);
@@ -709,22 +711,18 @@ contact@carlogbook.app`;
     if (text.toLowerCase().startsWith("paid ")) {
       const rawText = text.slice(5).trim();
 
-      // FIX: AI extracts TID from any SMS format, fallback to first word
       let txnId = null;
 
       const words = rawText.split(" ");
       if (words.length <= 2) {
-        // short message — user typed ID manually
         txnId = words[0].trim().toUpperCase();
       } else {
-        // long message — likely a pasted SMS, use AI to extract
         console.log("Extracting TID from SMS via AI...");
         const extracted = await extractTransactionId(rawText);
         if (extracted) {
           txnId = extracted.toUpperCase();
           console.log("AI extracted TID:", txnId);
         } else {
-          // AI couldn't find it — ask user to type manually
           reply = `I couldn't find a transaction ID in that message.
 
 Please send just the transaction ID:
@@ -835,7 +833,6 @@ reject ${from}`
         for (const car of cars) {
           const isActive = car.id === carId;
 
-          // fetch last fuel log
           const { data: lastFuel } = await supabase
             .from("logs")
             .select("amount, created_at")
@@ -845,7 +842,6 @@ reject ${from}`
             .limit(1)
             .single();
 
-          // fetch last mileage log
           const { data: lastMileage } = await supabase
             .from("logs")
             .select("mileage, created_at")
@@ -855,7 +851,6 @@ reject ${from}`
             .limit(1)
             .single();
 
-          // fetch total log count
           const { count: totalLogs } = await supabase
             .from("logs")
             .select("*", { count: "exact", head: true })
@@ -1043,7 +1038,9 @@ Type: upgrade`;
           if (log.type === "fuel") {
             line = `⛽ Fuel — ${log.amount?.toLocaleString()} TZS`;
           } else if (log.type === "maintenance") {
-            line = `🔧 ${log.description}`;
+            // show subtype label if available, otherwise generic
+            const label = log.subtype ? subtypeLabel(log.subtype) : null;
+            line = `🔧 ${label || "Maintenance"} — ${log.amount?.toLocaleString()} TZS`;
           } else if (log.type === "mileage") {
             line = `📏 Mileage — ${log.mileage?.toLocaleString()} km`;
           } else if (log.type === "insurance") {
@@ -1085,7 +1082,6 @@ Type: upgrade`;
 
     // ── PLATE NUMBER DETECTED ─────────────────────────────────────────────
     if (isPlateNumber(text)) {
-      // FIX: strip spaces from plate before saving e.g. "T 123 ABC" → "T123ABC"
       const plate = text.trim().replace(/\s+/g, "").toUpperCase();
 
       await supabase
@@ -1183,7 +1179,6 @@ Please try again or type "cancel" to go back.`;
         return res.sendStatus(200);
       }
 
-      // FIX: strip spaces from plate
       const plate = text.trim().replace(/\s+/g, "").toUpperCase();
 
       await supabase
@@ -1199,17 +1194,16 @@ Please try again or type "cancel" to go back.`;
 
     // ── EXPENSE LOG ───────────────────────────────────────────────────────
     const amount = parseAmount(text);
-    const type = detectType(text);
+    const { type, subtype } = detectType(text);
 
-    // FIX: only try to log if message looks like a log
-    // Prevents SMS dumps and random long messages being saved as logs
     if (amount && carId && looksLikeLog(text)) {
       const { count } = await supabase
         .from("logs")
         .select("*", { count: "exact", head: true })
         .eq("car_id", carId);
 
-      await saveLog(carId, type, amount, text);
+      // pass subtype to saveLog
+      await saveLog(carId, type, amount, text, null, subtype);
 
       const isFirstLog = count === 0;
 
@@ -1225,10 +1219,13 @@ Keep going:
         const carUsed = userCars.find(car => car.id === carId);
         const carName = carUsed ? carUsed.car_name : "your car";
 
+        // use subtype label if available for a more specific confirmation
         let typeLabel = "Expense";
         if (type === "fuel") typeLabel = "Fuel";
-        else if (type === "maintenance") typeLabel = "Maintenance";
         else if (type === "insurance") typeLabel = "Insurance";
+        else if (type === "maintenance") {
+          typeLabel = subtype ? (subtypeLabel(subtype) || "Maintenance") : "Maintenance";
+        }
 
         const isMilestone = count > 0 && (count + 1) % 10 === 0;
 
@@ -1255,13 +1252,11 @@ ${typeLabel}: ${amount.toLocaleString()} TZS`;
     }
 
     // ── AI SMART FALLBACK ─────────────────────────────────────────────────
-    // When bot doesn't understand, Claude tries to help
-    const aiReply = await getAIFallbackReply(text, user.name, userCars);
+    const aiReply = await getAIFallbackReply(text, userCars);
 
     if (aiReply) {
       reply = aiReply;
     } else {
-      // AI failed — use static fallback
       reply = `Hmm, I didn't quite get that. 🤔
 
 Here are some things you can try:

@@ -1,6 +1,6 @@
 const supabase = require("../config/supabase");
 
-async function saveLog(carId, type, amount, description, mileage = null) {
+async function saveLog(carId, type, amount, description, mileage = null, subtype = null) {
 
   const { data, error } = await supabase
     .from("logs")
@@ -9,7 +9,8 @@ async function saveLog(carId, type, amount, description, mileage = null) {
       type: type,
       amount: amount,
       mileage: mileage,
-      description: description
+      description: description,
+      subtype: subtype
     })
     .select()
     .single();
@@ -24,7 +25,7 @@ async function saveLog(carId, type, amount, description, mileage = null) {
 
 async function getRecentLogs(carId, limit = 5) {
 
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from("logs")
     .select("*")
     .eq("car_id", carId)
@@ -38,21 +39,17 @@ async function getLogsThisMonth(carId) {
 
   const now = new Date();
 
-  const firstDay = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    1
-  );
+  // FIX: use created_at instead of log_date — log_date is never set
+  const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from("logs")
     .select("*")
     .eq("car_id", carId)
-    .gte("log_date", firstDay.toISOString())
-    .order("log_date", { ascending: false });
+    .gte("created_at", firstDay.toISOString())
+    .order("created_at", { ascending: false });
 
   return data || [];
-
 }
 
 async function deleteLastLog(carId) {
@@ -73,7 +70,6 @@ async function deleteLastLog(carId) {
     .eq("id", lastLog.id);
 
   return lastLog;
-
 }
 
 module.exports = { saveLog, getRecentLogs, getLogsThisMonth, deleteLastLog };
