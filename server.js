@@ -49,6 +49,7 @@ function extractMileage(text) {
 
 function isPremium(user) {
   if (!PREMIUM_ENABLED) return true;
+  if (user.is_lifetime) return true; // lifetime users never expire
   if (!user.is_premium) return false;
   if (!user.premium_until) return true;
   const gracePeriodMs = 3 * 24 * 60 * 60 * 1000;
@@ -56,6 +57,7 @@ function isPremium(user) {
 }
 
 function isActivePremiumUser(user) {
+  if (user.is_lifetime) return true; // lifetime users always active
   if (!user.is_premium) return false;
   if (!user.premium_until) return true;
   const gracePeriodMs = 3 * 24 * 60 * 60 * 1000;
@@ -194,6 +196,7 @@ app.get("/cron/check-premium", async (req, res) => {
     .from("users")
     .select("*")
     .eq("is_premium", true)
+    .eq("is_lifetime", false)
     .not("premium_until", "is", null)
     .gte("premium_until", now.toISOString());
 
@@ -398,10 +401,17 @@ Example: T123ABC`;
     if (from === ADMIN_PHONE) {
 
       if (text.toLowerCase().startsWith("approve ")) {
-        const targetPhone = text.split(" ")[1]?.trim();
+        const parts = text.split(" ");
+        const targetPhone = parts[1]?.trim();
+        const plan = parts[2]?.toLowerCase().trim() || "monthly";
 
         if (!targetPhone) {
-          await sendReply(from, `Usage: approve 255XXXXXXXXX`);
+          await sendReply(from, `Usage:\napprove 255XXXXXXXXX\napprove 255XXXXXXXXX annual`);
+          return res.sendStatus(200);
+        }
+
+        if (!["monthly", "annual"].includes(plan)) {
+          await sendReply(from, `❌ Unknown plan: "${plan}"\n\nValid plans: monthly, annual`);
           return res.sendStatus(200);
         }
 
@@ -416,13 +426,19 @@ Example: T123ABC`;
           return res.sendStatus(200);
         }
 
+        const now = new Date();
+        const premiumUntil = plan === "annual"
+          ? new Date(now.setFullYear(now.getFullYear() + 1)).toISOString()
+          : new Date(now.setMonth(now.getMonth() + 1)).toISOString();
+
+        const amount = plan === "annual" ? 50000 : 5000;
+
         await supabase
           .from("users")
           .update({
             is_premium: true,
-            premium_until: new Date(
-              new Date().setMonth(new Date().getMonth() + 1)
-            ).toISOString(),
+            premium_until: premiumUntil,
+            premium_plan: plan,
             premium_warned_3d: false,
             premium_warned_1d: false
           })
@@ -430,27 +446,35 @@ Example: T123ABC`;
 
         await supabase
           .from("payments")
-          .update({ status: "approved" })
+          .update({ status: "approved", plan, amount })
           .eq("user_id", targetUser.id)
           .eq("status", "pending");
+
+        const planLabel = plan === "annual" ? "Annual (1 year)" : "Monthly (1 month)";
+        const expiryLabel = new Date(premiumUntil).toLocaleDateString("en-GB", {
+          day: "numeric", month: "short", year: "numeric"
+        });
 
         await sendReply(
           targetPhone,
           `🎉 You're now a Premium user!
 
-You can now:
+Plan: ${planLabel}
+Expires: ${expiryLabel}
 
+You can now:
 • Add multiple cars
-• View history per car
-• Access all future premium features
+• View full history
+• Get insurance reminders
+• Monthly expense summaries
 
 Try:
 add car
-cars
-history rav4`
+history month
+upgrade`
         );
 
-        await sendReply(from, `✅ ${targetUser.name} (${targetPhone}) has been upgraded to Premium.`);
+        await sendReply(from, `✅ ${targetUser.name} (${targetPhone}) approved on ${plan} plan. Expires: ${expiryLabel}`);
         return res.sendStatus(200);
       }
 
@@ -664,24 +688,28 @@ We read every message and use it to make Car Logbook better.`;
             })
           : null;
 
+        const planLabel = user.premium_plan === "annual" ? "Annual" : "Monthly";
+
         reply = `⭐ You're already a Premium user!
 
 Your Premium features are active:
 • Multiple cars
 • Full history access
 • More coming soon
-${expiryDate ? `\nYour plan renews on: ${expiryDate}` : ""}
+${expiryDate ? `\nPlan: ${planLabel}\nRenews on: ${expiryDate}` : ""}
 Thank you for supporting Car Logbook! 🙏`;
       } else {
         reply = `⭐ Car Logbook Premium
 
-Unlock more features for just 5,000 TZS/month:
+Monthly: 5,000 TZS/month
+Annual: 50,000 TZS/year (save 10,000 TZS)
 
+What you get:
 ✅ Multiple cars
-✅ History per car
-✅ Extended history (last 10, monthly)
-✅ Photo receipts (coming soon)
-✅ Analytics & exports (coming soon)
+✅ Full history (last 10, monthly, per car)
+✅ Insurance expiry reminders
+✅ Monthly expense summary
+✅ More features coming soon
 
 ─────────────────
 How to upgrade:
@@ -694,14 +722,13 @@ How to upgrade:
 2. After paying, send:
    paid <transaction_id>
 
-   Or paste your full SMS confirmation and I'll find the ID automatically.
+   Or paste your full SMS and I'll find the ID.
 
    Example:
    paid QHG72K3
 ─────────────────
 
-Questions? Contact us:
-contact@carlogbook.app`;
+Questions? contact@carlogbook.app`;
       }
 
       await sendReply(from, reply);
