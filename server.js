@@ -20,6 +20,9 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Set to true to enforce free vs premium restrictions
 const PREMIUM_ENABLED = false;
 
+// AI fallback: max calls per user per day (applies when PREMIUM_ENABLED = true)
+const AI_FALLBACK_DAILY_LIMIT = 3;
+
 const app = express();
 
 app.use(express.json());
@@ -83,6 +86,15 @@ function subtypeLabel(subtype) {
   return labels[subtype] || null;
 }
 
+// Sleep helper for broadcast rate limiting
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Reminder frequency → days mapping
+function reminderDays(frequency) {
+  const map = { "7days": 7, "14days": 14, "30days": 30 };
+  return map[frequency] || 7;
+}
+
 // ─── AI FUNCTIONS ─────────────────────────────────────────────────────────────
 
 async function extractTransactionId(smsText) {
@@ -115,8 +127,18 @@ async function extractTransactionId(smsText) {
   }
 }
 
-async function getAIFallbackReply(userMessage, userCars) {
+async function getAIFallbackReply(userMessage, userCars, userId) {
+  // When PREMIUM_ENABLED: only premium users get AI fallback
+  // Also rate-limited to AI_FALLBACK_DAILY_LIMIT calls/day via daily_usage.ai_fallback_count
+
   try {
+    // Check AI fallback rate limit (uses same daily_usage table, new field)
+    if (PREMIUM_ENABLED) {
+      const allowed = await checkLimit(userId, "ai_fallback_count");
+      if (!allowed) return null; // fall through to static reply
+      await incrementUsage(userId, "ai_fallback_count");
+    }
+
     const carList = userCars.length
       ? userCars.map(c => c.car_name).join(", ")
       : "no cars registered yet";
@@ -172,7 +194,7 @@ app.get("/whatsapp", (req, res) => {
   }
 });
 
-// ─── CRON: CHECK PREMIUM EXPIRY ───────────────────────────────────────────────
+// ─── CRON: CHECK PREMIUM EXPIRY + INSURANCE + INACTIVE REMINDERS ──────────────
 
 app.get("/cron/check-premium", async (req, res) => {
   const secret = req.headers["x-cron-secret"] || req.query.secret;
@@ -182,6 +204,7 @@ app.get("/cron/check-premium", async (req, res) => {
   const in3Days = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
   const in1Day  = new Date(now.getTime() + 1 * 24 * 60 * 60 * 1000);
 
+  // ── PREMIUM EXPIRY ─────────────────────────────────────────────────────
   const { data: premiumUsers } = await supabase
     .from("users")
     .select("*")
@@ -200,7 +223,6 @@ app.get("/cron/check-premium", async (req, res) => {
       await supabase.from("users").update({
         is_premium: false, premium_warned_3d: false, premium_warned_1d: false
       }).eq("id", u.id);
-
       await sendReply(u.phone_number,
         `Your Car Logbook Premium has ended.\n\nYou're now on the free plan:\n• 1 car\n• Basic logging\n• Last 5 logs history\n\nTo get Premium back, type: upgrade\n\nWe hope to see you back! 🙏`
       );
@@ -278,6 +300,76 @@ app.get("/cron/check-premium", async (req, res) => {
     }
   }
 
+  // ── INACTIVE USER REMINDERS ────────────────────────────────────────────
+  // Grace period: skip users who joined less than 3 days ago
+  // Skip users with reminder_frequency = 'off'
+  // Only nudge if: last_log_at is older than their frequency interval
+  //           AND: last_reminder_sent_at is older than their frequency interval (avoid double-nudging)
+
+  const { data: allUsersForReminder } = await supabase
+    .from("users")
+    .select("id, name, phone_number, created_at, last_log_at, last_reminder_sent_at, reminder_frequency")
+    .neq("reminder_frequency", "off");
+
+  let inactiveReminders = 0;
+  const gracePeriodDays = 3;
+
+  for (const u of allUsersForReminder || []) {
+    try {
+      const joinedAt = new Date(u.created_at);
+      const daysSinceJoin = (now - joinedAt) / (1000 * 60 * 60 * 24);
+
+      // Skip brand new users
+      if (daysSinceJoin < gracePeriodDays) continue;
+
+      const freqDays = reminderDays(u.reminder_frequency || "7days");
+      const freqMs = freqDays * 24 * 60 * 60 * 1000;
+
+      // Check if inactive long enough
+      const lastLog = u.last_log_at ? new Date(u.last_log_at) : joinedAt;
+      const daysSinceLog = (now - lastLog) / (1000 * 60 * 60 * 24);
+      if (daysSinceLog < freqDays) continue;
+
+      // Check if we already sent a reminder recently
+      if (u.last_reminder_sent_at) {
+        const lastReminderAt = new Date(u.last_reminder_sent_at);
+        if ((now - lastReminderAt) < freqMs) continue;
+      }
+
+      // Build nudge message
+      const freqLabel = freqDays === 7 ? "week" : freqDays === 14 ? "2 weeks" : "month";
+
+      await sendReply(u.phone_number,
+`👋 Hey ${u.name}! It's been a ${freqLabel} since your last log.
+
+Keeping your logbook up to date takes just a few seconds:
+
+⛽ fuel 40k
+🔧 oil change 120k
+📏 mileage 30402
+
+Your car history is only as good as what you track. 🚗
+
+─────────────────
+To change how often I remind you:
+reminders weekly
+reminders fortnightly
+reminders monthly
+reminders off`
+      );
+
+      await supabase.from("users")
+        .update({ last_reminder_sent_at: now.toISOString() })
+        .eq("id", u.id);
+
+      inactiveReminders++;
+    } catch (err) {
+      console.error(`Inactive reminder error for ${u.phone_number}:`, err.message);
+    }
+  }
+
+  console.log(`Inactive reminders sent: ${inactiveReminders}`);
+
   // ── EWURA REMINDER: nudge admin on 3rd if prices not entered ──────────
   const todayDate = new Date();
   if (todayDate.getDate() === 3) {
@@ -309,7 +401,7 @@ ewura broadcast`
   }
 
   console.log(`Insurance reminders sent: ${insuranceReminders}`);
-  return res.status(200).json({ warned3, warned1, downgraded, insuranceReminders });
+  return res.status(200).json({ warned3, warned1, downgraded, insuranceReminders, inactiveReminders });
 });
 
 // ─── CRON: MONTHLY SUMMARY ────────────────────────────────────────────────────
@@ -408,6 +500,7 @@ app.get("/cron/monthly", async (req, res) => {
       }
 
       await sendReply(u.phone_number, summaryMsg);
+      await sleep(100); // rate limit protection
       summariesSent++;
 
     } catch (err) {
@@ -629,6 +722,9 @@ upgrade`
           .in("car_id", (userCarLinks || []).map(l => l.car_id));
 
         const joined = new Date(targetUser.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+        const lastLogStr = targetUser.last_log_at
+          ? new Date(targetUser.last_log_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+          : "Never";
 
         let planStatus = "Free";
         if (targetUser.is_lifetime) planStatus = "Lifetime ⭐";
@@ -638,6 +734,7 @@ upgrade`
         }
 
         const carList = (userCarLinks || []).map(l => `  • ${l.cars.car_name} (${l.cars.plate_number})`).join("\n") || "  None";
+        const freqLabel = { "7days": "Weekly", "14days": "Fortnightly", "30days": "Monthly", "off": "Off" };
 
         await sendReply(from,
 `👤 User Lookup
@@ -647,6 +744,8 @@ Phone: ${targetPhone}
 Joined: ${joined}
 Plan: ${planStatus}
 City: ${targetUser.city || "Not set"}
+Last log: ${lastLogStr}
+Reminders: ${freqLabel[targetUser.reminder_frequency || "7days"] || "Weekly"}
 Cars: ${userCarLinks?.length || 0}
 ${carList}
 Total logs: ${totalLogs || 0}`
@@ -735,13 +834,14 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
 
       // STATS
       if (text.toLowerCase() === "stats") {
-        const { count: totalUsers }      = await supabase.from("users").select("*", { count: "exact", head: true });
-        const { count: premiumUsers }    = await supabase.from("users").select("*", { count: "exact", head: true }).eq("is_premium", true);
-        const { count: totalLogs }       = await supabase.from("logs").select("*", { count: "exact", head: true });
-        const { count: usersWithCity }   = await supabase.from("users").select("*", { count: "exact", head: true }).not("city", "is", null);
+        const { count: totalUsers }       = await supabase.from("users").select("*", { count: "exact", head: true });
+        const { count: premiumUsers }     = await supabase.from("users").select("*", { count: "exact", head: true }).eq("is_premium", true);
+        const { count: totalLogs }        = await supabase.from("logs").select("*", { count: "exact", head: true });
+        const { count: usersWithCity }    = await supabase.from("users").select("*", { count: "exact", head: true }).not("city", "is", null);
+        const { count: remindersOff }     = await supabase.from("users").select("*", { count: "exact", head: true }).eq("reminder_frequency", "off");
         const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
         const { count: newUsersThisWeek } = await supabase.from("users").select("*", { count: "exact", head: true }).gte("created_at", oneWeekAgo);
-        const { count: pendingCount }    = await supabase.from("payments").select("*", { count: "exact", head: true }).eq("status", "pending");
+        const { count: pendingCount }     = await supabase.from("payments").select("*", { count: "exact", head: true }).eq("status", "pending");
 
         await sendReply(from,
 `📊 Car Logbook Stats
@@ -751,7 +851,8 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
 🆕 New this week: ${newUsersThisWeek || 0}
 📋 Total logs: ${totalLogs || 0}
 💰 Pending payments: ${pendingCount || 0}
-📍 Users with city: ${usersWithCity || 0}`
+📍 Users with city: ${usersWithCity || 0}
+🔕 Reminders off: ${remindersOff || 0}`
         );
         return res.sendStatus(200);
       }
@@ -767,15 +868,20 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
         await sendReply(from, `📡 Sending broadcast to ${allUsers.length} users...`);
         let sent = 0, failed = 0;
         for (const u of allUsers) {
-          try { await sendReply(u.phone_number, broadcastMessage); sent++; }
-          catch (e) { console.error(`Broadcast failed for ${u.phone_number}:`, e.message); failed++; }
+          try {
+            await sendReply(u.phone_number, broadcastMessage);
+            sent++;
+            await sleep(100); // avoid WhatsApp rate limiting
+          } catch (e) {
+            console.error(`Broadcast failed for ${u.phone_number}:`, e.message);
+            failed++;
+          }
         }
         await sendReply(from, `✅ Broadcast complete.\nSent: ${sent}\nFailed: ${failed}`);
         return res.sendStatus(200);
       }
 
       // ── ADMIN: EWURA SET PRICES ─────────────────────────────────────────
-      // Usage: ewura arusha 2973 2967 3042  |  ewura dar 2864 2858 2932
       if (text.toLowerCase().startsWith("ewura ") &&
           !text.toLowerCase().startsWith("ewura broadcast") &&
           !text.toLowerCase().startsWith("ewura status")) {
@@ -792,15 +898,10 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
         const cityRaw  = parts.slice(1, parts.length - 3).join(" ").toLowerCase().trim();
 
         const cityAliases = {
-          "dar": "dar es salaam",
-          "dares salaam": "dar es salaam",
-          "dar es salaam": "dar es salaam",
-          "arusha": "arusha",
-          "dodoma": "dodoma",
-          "mwanza": "mwanza",
-          "mbeya": "mbeya",
-          "moshi": "moshi",
-          "tanga": "tanga"
+          "dar": "dar es salaam", "dares salaam": "dar es salaam",
+          "dar es salaam": "dar es salaam", "arusha": "arusha",
+          "dodoma": "dodoma", "mwanza": "mwanza",
+          "mbeya": "mbeya", "moshi": "moshi", "tanga": "tanga"
         };
         const city = cityAliases[cityRaw] || cityRaw;
 
@@ -864,11 +965,9 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
           return res.sendStatus(200);
         }
 
-        // Build price map
         const priceMap = {};
         for (const p of prices) priceMap[p.city.toLowerCase().trim()] = p;
 
-        // National highlights (first 5 cities entered)
         const highlights = prices.slice(0, 5).map(p =>
           `📍 ${p.city.charAt(0).toUpperCase() + p.city.slice(1)}: Petrol ${p.petrol?.toLocaleString()} | Diesel ${p.diesel?.toLocaleString()}`
         ).join("\n");
@@ -892,14 +991,13 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
               msg += `Kerosene: ${cityPrice.kerosene?.toLocaleString()} TZS/L\n`;
             } else {
               msg += `${highlights}\n`;
-              if (!userCity) {
-                msg += `\n📍 Set your city for local prices:\nmy city Arusha`;
-              }
+              if (!userCity) msg += `\n📍 Set your city for local prices:\nmy city Arusha`;
             }
 
             msg += `\n─────────────────\nSource: EWURA Tanzania\nEffective: ${monthLabel}`;
 
             await sendReply(u.phone_number, msg);
+            await sleep(100); // avoid WhatsApp rate limiting
             sent++;
           } catch (e) {
             console.error(`EWURA broadcast failed for ${u.phone_number}:`, e.message);
@@ -980,6 +1078,33 @@ Monthly cron:
 
     if (detectedCars.length === 1) carId = detectedCars[0].id;
 
+    // ── REMINDERS COMMAND ─────────────────────────────────────────────────
+    if (text.toLowerCase().startsWith("reminders ")) {
+      const option = text.toLowerCase().split(" ")[1]?.trim();
+      const validOptions = {
+        "weekly":      "7days",
+        "fortnightly": "14days",
+        "monthly":     "30days",
+        "off":         "off"
+      };
+
+      if (!validOptions[option]) {
+        await sendReply(from,
+          `To set your reminder frequency, reply with one of:\n\nreminders weekly\nreminders fortnightly\nreminders monthly\nreminders off`
+        );
+        return res.sendStatus(200);
+      }
+
+      await supabase.from("users").update({ reminder_frequency: validOptions[option] }).eq("id", user.id);
+
+      const confirmMsg = option === "off"
+        ? `🔕 Got it — no more logging reminders.\n\nYou can turn them back on anytime:\nreminders weekly`
+        : `✅ Reminders set to ${option}.\n\nI'll nudge you if you haven't logged anything in ${option === "weekly" ? "7 days" : option === "fortnightly" ? "14 days" : "30 days"}.`;
+
+      await sendReply(from, confirmMsg);
+      return res.sendStatus(200);
+    }
+
     // ── MY CITY ───────────────────────────────────────────────────────────
     if (text.toLowerCase().startsWith("my city ")) {
       const newCity = text.slice(8).trim();
@@ -989,7 +1114,6 @@ Monthly cron:
         return res.sendStatus(200);
       }
 
-      // Already has a city → premium to change
       if (user.city && PREMIUM_ENABLED && !isPremium(user)) {
         await sendReply(from,
           `⭐ Changing your city is a Premium feature.\n\nYour current city: ${user.city}\n\nUpgrade to update it: upgrade`
@@ -1092,6 +1216,7 @@ Cars:
 
 Settings:
 📍 my city Arusha → local fuel prices ${PREMIUM_ENABLED ? "(free to set, Premium to change)" : ""}
+🔔 reminders weekly / monthly / off → logging reminders
 
 Other:
 ↩️ undo → remove last log
@@ -1486,12 +1611,15 @@ Questions? contact@carlogbook.app`
           await incrementUsage(user.id, "log_count");
         }
 
-        // Check if first mileage log for baseline prompt
         const { count: mileageCount } = await supabase
           .from("logs").select("*", { count: "exact", head: true })
           .eq("car_id", carId).eq("type", "mileage");
 
         await saveLog(carId, "mileage", null, `Mileage ${mileage}`, mileage);
+
+        // Update last_log_at
+        await supabase.from("users").update({ last_log_at: new Date().toISOString() }).eq("id", user.id);
+
         reply = `📏 Mileage logged — ${mileage.toLocaleString()} km`;
 
         if (mileageCount === 0) {
@@ -1537,7 +1665,6 @@ Questions? contact@carlogbook.app`
       const isFirstCar = userCars.length === 0;
 
       if (isFirstCar) {
-        // Start city onboarding
         await supabase.from("users").update({ onboarding_step: "awaiting_city" }).eq("id", user.id);
 
         await sendReply(from,
@@ -1592,6 +1719,9 @@ Or type "skip" to skip.`
 
       await saveLog(carId, type, amount, text, null, subtype);
 
+      // Update last_log_at on every successful log
+      await supabase.from("users").update({ last_log_at: new Date().toISOString() }).eq("id", user.id);
+
       const isFirstLog = count === 0;
 
       if (isFirstLog) {
@@ -1615,7 +1745,6 @@ Or type "skip" to skip.`
           reply = `✅ Log saved\n\nCar: ${carName}\n${typeLabel}: ${amount.toLocaleString()} TZS`;
         }
 
-        // Post-insurance expiry prompt
         if (type === "insurance") {
           const { data: existingInsurance } = await supabase.from("car_insurance").select("id").eq("car_id", carId).single();
           if (!existingInsurance) {
@@ -1629,7 +1758,7 @@ Or type "skip" to skip.`
     }
 
     // ── AI SMART FALLBACK ─────────────────────────────────────────────────
-    const aiReply = await getAIFallbackReply(text, userCars);
+    const aiReply = await getAIFallbackReply(text, userCars, user.id);
 
     await sendReply(from, aiReply ||
       `Hmm, I didn't quite get that. 🤔\n\nHere are some things you can try:\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history\n🚗 cars\n\nOr type "help" for the full guide.\n\n💬 Something not working as expected?\nfeedback <your message>`
