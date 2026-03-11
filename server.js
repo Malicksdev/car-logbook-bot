@@ -49,7 +49,7 @@ function extractMileage(text) {
 
 function isPremium(user) {
   if (!PREMIUM_ENABLED) return true;
-  if (user.is_lifetime) return true; // lifetime users never expire
+  if (user.is_lifetime) return true;
   if (!user.is_premium) return false;
   if (!user.premium_until) return true;
   const gracePeriodMs = 3 * 24 * 60 * 60 * 1000;
@@ -57,29 +57,28 @@ function isPremium(user) {
 }
 
 function isActivePremiumUser(user) {
-  if (user.is_lifetime) return true; // lifetime users always active
+  if (user.is_lifetime) return true;
   if (!user.is_premium) return false;
   if (!user.premium_until) return true;
   const gracePeriodMs = 3 * 24 * 60 * 60 * 1000;
   return new Date(user.premium_until).getTime() + gracePeriodMs > Date.now();
 }
 
-// Human-readable subtype labels for history display
 function subtypeLabel(subtype) {
   const labels = {
-    engine_oil:   "Engine Oil",
-    oil_filter:   "Oil Filter",
-    fuel_filter:  "Fuel Filter",
-    air_filter:   "Air Cleaner/Filter",
-    coolant:      "Coolant",
-    gearbox_oil:  "Gearbox Oil",
-    hydraulic:    "Hydraulic Fluid",
-    battery:      "Battery",
-    tyre:         "Tyres",
-    wiper:        "Wiper Blades",
-    brake:        "Brakes",
-    wash:         "Car Wash",
-    service:      "Service"
+    engine_oil:  "Engine Oil",
+    oil_filter:  "Oil Filter",
+    fuel_filter: "Fuel Filter",
+    air_filter:  "Air Cleaner/Filter",
+    coolant:     "Coolant",
+    gearbox_oil: "Gearbox Oil",
+    hydraulic:   "Hydraulic Fluid",
+    battery:     "Battery",
+    tyre:        "Tyres",
+    wiper:       "Wiper Blades",
+    brake:       "Brakes",
+    wash:        "Car Wash",
+    service:     "Service"
   };
   return labels[subtype] || null;
 }
@@ -96,9 +95,7 @@ async function extractTransactionId(smsText) {
         messages: [
           {
             role: "user",
-            content: `Extract the transaction ID from this mobile money SMS confirmation. Return ONLY the transaction ID, nothing else. If you cannot find a transaction ID, return the word "NONE".
-
-SMS: ${smsText}`
+            content: `Extract the transaction ID from this mobile money SMS confirmation. Return ONLY the transaction ID, nothing else. If you cannot find a transaction ID, return the word "NONE".\n\nSMS: ${smsText}`
           }
         ]
       },
@@ -110,10 +107,8 @@ SMS: ${smsText}`
         }
       }
     );
-
     const result = response.data.content[0].text.trim();
     return result === "NONE" ? null : result;
-
   } catch (error) {
     console.error("AI TID extraction error:", error.message);
     return null;
@@ -154,9 +149,7 @@ User message: "${userMessage}"`
         }
       }
     );
-
     return response.data.content[0].text.trim();
-
   } catch (error) {
     console.error("AI fallback error:", error.message);
     return null;
@@ -183,10 +176,7 @@ app.get("/whatsapp", (req, res) => {
 
 app.get("/cron/check-premium", async (req, res) => {
   const secret = req.headers["x-cron-secret"] || req.query.secret;
-
-  if (secret !== process.env.CRON_SECRET) {
-    return res.sendStatus(403);
-  }
+  if (secret !== process.env.CRON_SECRET) return res.sendStatus(403);
 
   const now = new Date();
   const in3Days = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
@@ -200,98 +190,51 @@ app.get("/cron/check-premium", async (req, res) => {
     .not("premium_until", "is", null)
     .gte("premium_until", now.toISOString());
 
-  if (!premiumUsers || !premiumUsers.length) {
-    return res.status(200).json({ message: "No premium users to process." });
-  }
-
   let warned3 = 0, warned1 = 0, downgraded = 0;
 
-  for (const u of premiumUsers) {
+  for (const u of premiumUsers || []) {
     const expiryDate = new Date(u.premium_until);
     const graceEnd = new Date(expiryDate.getTime() + 3 * 24 * 60 * 60 * 1000);
 
     if (now > graceEnd) {
-      await supabase
-        .from("users")
-        .update({
-          is_premium: false,
-          premium_warned_3d: false,
-          premium_warned_1d: false
-        })
-        .eq("id", u.id);
+      await supabase.from("users").update({
+        is_premium: false, premium_warned_3d: false, premium_warned_1d: false
+      }).eq("id", u.id);
 
-      await sendReply(
-        u.phone_number,
-        `Your Car Logbook Premium has ended.
-
-You're now on the free plan:
-• 1 car
-• Basic logging
-• Last 5 logs history
-
-To get Premium back, type: upgrade
-
-We hope to see you back! 🙏`
+      await sendReply(u.phone_number,
+        `Your Car Logbook Premium has ended.\n\nYou're now on the free plan:\n• 1 car\n• Basic logging\n• Last 5 logs history\n\nTo get Premium back, type: upgrade\n\nWe hope to see you back! 🙏`
       );
       downgraded++;
       continue;
     }
 
-    if (
-      expiryDate.toDateString() === in3Days.toDateString() &&
-      !u.premium_warned_3d
-    ) {
-      await sendReply(
-        u.phone_number,
-        `⭐ Your Car Logbook Premium expires in 3 days.
-
-To keep your premium features, renew now:
-
-Type: upgrade
-
-Questions? contact@carlogbook.app`
+    if (expiryDate.toDateString() === in3Days.toDateString() && !u.premium_warned_3d) {
+      await sendReply(u.phone_number,
+        `⭐ Your Car Logbook Premium expires in 3 days.\n\nTo keep your premium features, renew now:\n\nType: upgrade\n\nQuestions? contact@carlogbook.app`
       );
-
-      await supabase
-        .from("users")
-        .update({ premium_warned_3d: true })
-        .eq("id", u.id);
-
+      await supabase.from("users").update({ premium_warned_3d: true }).eq("id", u.id);
       warned3++;
       continue;
     }
 
-    if (
-      expiryDate.toDateString() === in1Day.toDateString() &&
-      !u.premium_warned_1d
-    ) {
-      await sendReply(
-        u.phone_number,
-        `⚠️ Your Car Logbook Premium expires tomorrow!
-
-Renew today to avoid losing access to your premium features.
-
-Type: upgrade`
+    if (expiryDate.toDateString() === in1Day.toDateString() && !u.premium_warned_1d) {
+      await sendReply(u.phone_number,
+        `⚠️ Your Car Logbook Premium expires tomorrow!\n\nRenew today to avoid losing access to your premium features.\n\nType: upgrade`
       );
-
-      await supabase
-        .from("users")
-        .update({ premium_warned_1d: true })
-        .eq("id", u.id);
-
+      await supabase.from("users").update({ premium_warned_1d: true }).eq("id", u.id);
       warned1++;
     }
   }
 
   console.log(`Cron ran: ${warned3} 3-day warnings, ${warned1} 1-day warnings, ${downgraded} downgraded`);
 
-  // ── INSURANCE EXPIRY REMINDERS (premium only) ──────────────────────────
+  // ── INSURANCE EXPIRY REMINDERS ─────────────────────────────────────────
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const in30Days  = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-const in7DaysIns = new Date(today.getTime() + 7  * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-const in1DayIns  = new Date(today.getTime() + 1  * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const in30Days   = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const in7DaysIns = new Date(today.getTime() + 7  * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const in1DayIns  = new Date(today.getTime() + 1  * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
   const { data: insuranceRecords } = await supabase
     .from("car_insurance")
@@ -309,10 +252,8 @@ const in1DayIns  = new Date(today.getTime() + 1  * 24 * 60 * 60 * 1000).toISOStr
       const u = link.users;
       if (!u) continue;
 
-      // Only send reminders to premium users
       const userIsPremium = u.is_lifetime || (u.is_premium && u.premium_until &&
         new Date(u.premium_until).getTime() + 3 * 24 * 60 * 60 * 1000 > Date.now());
-
       if (!userIsPremium) continue;
 
       if (expiry === in30Days && !record.notified_30d) {
@@ -337,17 +278,152 @@ const in1DayIns  = new Date(today.getTime() + 1  * 24 * 60 * 60 * 1000).toISOStr
     }
   }
 
+  // ── EWURA REMINDER: nudge admin on 3rd if prices not entered ──────────
+  const todayDate = new Date();
+  if (todayDate.getDate() === 3) {
+    const monthKey = `${todayDate.getFullYear()}-${String(todayDate.getMonth() + 1).padStart(2, "0")}`;
+    const { data: existingPrices } = await supabase
+      .from("fuel_prices").select("id").eq("month", monthKey).limit(1);
+
+    if (!existingPrices || existingPrices.length === 0) {
+      const monthLabel = todayDate.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+      await sendReply(ADMIN_PHONE,
+`⛽ EWURA Reminder
+
+Fuel prices for ${monthLabel} haven't been entered yet.
+
+Check https://ewura.go.tz and enter prices per city:
+
+ewura dar 2864 2858 2932
+ewura arusha 2973 2967 3042
+ewura dodoma 2942 2937 3011
+ewura mwanza 3049 3043 3118
+ewura mbeya 2996 2990 3064
+ewura moshi 2957 2952 3026
+ewura tanga 2925 2919 2993
+
+Then broadcast:
+ewura broadcast`
+      );
+    }
+  }
+
   console.log(`Insurance reminders sent: ${insuranceReminders}`);
   return res.status(200).json({ warned3, warned1, downgraded, insuranceReminders });
+});
+
+// ─── CRON: MONTHLY SUMMARY ────────────────────────────────────────────────────
+
+app.get("/cron/monthly", async (req, res) => {
+  const secret = req.headers["x-cron-secret"] || req.query.secret;
+  if (secret !== process.env.CRON_SECRET) return res.sendStatus(403);
+
+  const now = new Date();
+  const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const lastMonthStart = new Date(lastMonth.getFullYear(), lastMonth.getMonth(), 1).toISOString();
+  const lastMonthEnd   = new Date(lastMonth.getFullYear(), lastMonth.getMonth() + 1, 0, 23, 59, 59).toISOString();
+  const monthLabel = lastMonth.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+
+  const { data: allUsers } = await supabase.from("users").select("*");
+  let summariesSent = 0;
+
+  for (const u of allUsers || []) {
+    try {
+      const { data: carLinks } = await supabase
+        .from("car_users")
+        .select("car_id, cars (id, car_name, plate_number, fuel_type)")
+        .eq("user_id", u.id);
+
+      if (!carLinks || carLinks.length === 0) continue;
+
+      const userIsPremium = isPremium(u);
+      let summaryMsg = `📊 Monthly Summary — ${monthLabel}\n\n`;
+      let hasData = false;
+
+      for (const link of carLinks) {
+        const car = link.cars;
+        if (!car) continue;
+
+        const { data: logs } = await supabase
+          .from("logs")
+          .select("*")
+          .eq("car_id", car.id)
+          .gte("created_at", lastMonthStart)
+          .lte("created_at", lastMonthEnd);
+
+        if (!logs || logs.length === 0) continue;
+        hasData = true;
+
+        let totalFuel = 0, totalMaintenance = 0, totalInsurance = 0, totalSpend = 0;
+        let maintenanceByType = {};
+        let startMileage = null, endMileage = null;
+
+        for (const log of logs) {
+          if (log.type === "fuel") {
+            totalFuel += log.amount || 0;
+            totalSpend += log.amount || 0;
+          } else if (log.type === "maintenance") {
+            totalMaintenance += log.amount || 0;
+            totalSpend += log.amount || 0;
+            const label = subtypeLabel(log.subtype) || "Other";
+            maintenanceByType[label] = (maintenanceByType[label] || 0) + (log.amount || 0);
+          } else if (log.type === "insurance") {
+            totalInsurance += log.amount || 0;
+            totalSpend += log.amount || 0;
+          } else if (log.type === "mileage" && log.mileage) {
+            if (!startMileage || log.mileage < startMileage) startMileage = log.mileage;
+            if (!endMileage   || log.mileage > endMileage)   endMileage   = log.mileage;
+          }
+        }
+
+        const kmDriven = (startMileage && endMileage && endMileage > startMileage)
+          ? endMileage - startMileage : null;
+
+        summaryMsg += `🚗 ${car.car_name} (${car.plate_number})\n`;
+
+        if (userIsPremium) {
+          if (totalFuel > 0)
+            summaryMsg += `⛽ Fuel: ${totalFuel.toLocaleString()} TZS\n`;
+          if (Object.keys(maintenanceByType).length > 0) {
+            summaryMsg += `🔧 Maintenance: ${totalMaintenance.toLocaleString()} TZS\n`;
+            for (const [label, amt] of Object.entries(maintenanceByType)) {
+              summaryMsg += `   • ${label}: ${amt.toLocaleString()} TZS\n`;
+            }
+          }
+          if (totalInsurance > 0)
+            summaryMsg += `💰 Insurance: ${totalInsurance.toLocaleString()} TZS\n`;
+          if (kmDriven)
+            summaryMsg += `📏 Distance: ${kmDriven.toLocaleString()} km\n`;
+          summaryMsg += `━━━━━━━━━━━━\n`;
+          summaryMsg += `Total: ${totalSpend.toLocaleString()} TZS\n\n`;
+        } else {
+          summaryMsg += `Total spend: ${totalSpend.toLocaleString()} TZS\n\n`;
+        }
+      }
+
+      if (!hasData) continue;
+
+      if (!userIsPremium) {
+        summaryMsg += `─────────────────\n⭐ Want a full breakdown — fuel, maintenance, km driven?\n\nUpgrade to Premium: upgrade`;
+      }
+
+      await sendReply(u.phone_number, summaryMsg);
+      summariesSent++;
+
+    } catch (err) {
+      console.error(`Monthly summary error for ${u.phone_number}:`, err.message);
+    }
+  }
+
+  console.log(`Monthly summaries sent: ${summariesSent}`);
+  return res.status(200).json({ summariesSent, month: monthLabel });
 });
 
 // ─── INCOMING MESSAGES ────────────────────────────────────────────────────────
 
 app.post("/whatsapp", async (req, res) => {
   try {
-
     const body = req.body;
-
     if (!body.entry) return res.sendStatus(200);
 
     const message = body.entry[0].changes[0].value.messages?.[0];
@@ -368,19 +444,13 @@ app.post("/whatsapp", async (req, res) => {
         console.log("Duplicate message ignored:", messageId);
         return res.sendStatus(200);
       }
-
-      await supabase
-        .from("processed_messages")
-        .insert({ message_id: messageId });
-
+      await supabase.from("processed_messages").insert({ message_id: messageId });
     } catch (dedupError) {
       console.error("Dedup error:", dedupError.message);
     }
 
-    // Handle photo messages
     if (message.image) {
-      await sendReply(
-        from,
+      await sendReply(from,
         `📷 Nice receipt!\n\nSaving photo receipts is a Premium feature coming soon. For now, just type the amount and I'll log it for you.\n\nExample:\nfuel 45k`
       );
       return res.sendStatus(200);
@@ -400,60 +470,39 @@ app.post("/whatsapp", async (req, res) => {
 
     // ── BRAND NEW USER ────────────────────────────────────────────────────
     if (isNewUser) {
-      reply = `👋 Welcome to Car Logbook, ${user.name}!
-
-I help you track fuel, maintenance, mileage, and car expenses — right here on WhatsApp. No app needed.
-
-Let's get your car added first.
-
-What's your car's plate number?
-
-Example: T123ABC`;
-
-      await sendReply(from, reply);
+      await sendReply(from,
+        `👋 Welcome to Car Logbook, ${user.name}!\n\nI help you track fuel, maintenance, mileage, and car expenses — right here on WhatsApp. No app needed.\n\nLet's get your car added first.\n\nWhat's your car's plate number?\n\nExample: T123ABC`
+      );
       return res.sendStatus(200);
     }
 
-    // ── CANCEL COMMAND ────────────────────────────────────────────────────
+    // ── CANCEL ────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "cancel") {
-      await supabase
-        .from("users")
-        .update({ pending_plate: null })
-        .eq("id", user.id);
-
-      reply = `Okay, cancelled. What would you like to do?\n\nType "help" to see all commands.`;
-      await sendReply(from, reply);
+      await supabase.from("users").update({ pending_plate: null, onboarding_step: null }).eq("id", user.id);
+      await sendReply(from, `Okay, cancelled. What would you like to do?\n\nType "help" to see all commands.`);
       return res.sendStatus(200);
     }
 
     // ── CANCEL PAYMENT ────────────────────────────────────────────────────
     if (text.toLowerCase() === "cancel payment") {
       const { data: pendingPayment } = await supabase
-        .from("payments")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("status", "pending")
-        .single();
+        .from("payments").select("*")
+        .eq("user_id", user.id).eq("status", "pending").single();
 
       if (!pendingPayment) {
-        reply = `You don't have any pending payments to cancel.`;
-        await sendReply(from, reply);
+        await sendReply(from, `You don't have any pending payments to cancel.`);
         return res.sendStatus(200);
       }
 
-      await supabase
-        .from("payments")
-        .delete()
-        .eq("id", pendingPayment.id);
-
-      reply = `✅ Your pending payment (${pendingPayment.transaction_id}) has been cancelled.\n\nIf you'd like to try again, type: upgrade`;
-      await sendReply(from, reply);
+      await supabase.from("payments").delete().eq("id", pendingPayment.id);
+      await sendReply(from, `✅ Your pending payment (${pendingPayment.transaction_id}) has been cancelled.\n\nIf you'd like to try again, type: upgrade`);
       return res.sendStatus(200);
     }
 
     // ── ADMIN COMMANDS ────────────────────────────────────────────────────
     if (from === ADMIN_PHONE) {
 
+      // APPROVE
       if (text.toLowerCase().startsWith("approve ")) {
         const parts = text.split(" ");
         const targetPhone = parts[1]?.trim();
@@ -463,55 +512,33 @@ Example: T123ABC`;
           await sendReply(from, `Usage:\napprove 255XXXXXXXXX\napprove 255XXXXXXXXX annual`);
           return res.sendStatus(200);
         }
-
         if (!["monthly", "annual"].includes(plan)) {
           await sendReply(from, `❌ Unknown plan: "${plan}"\n\nValid plans: monthly, annual`);
           return res.sendStatus(200);
         }
 
-        const { data: targetUser } = await supabase
-          .from("users")
-          .select("*")
-          .eq("phone_number", targetPhone)
-          .single();
-
-        if (!targetUser) {
-          await sendReply(from, `❌ No user found with phone: ${targetPhone}`);
-          return res.sendStatus(200);
-        }
+        const { data: targetUser } = await supabase.from("users").select("*").eq("phone_number", targetPhone).single();
+        if (!targetUser) { await sendReply(from, `❌ No user found: ${targetPhone}`); return res.sendStatus(200); }
 
         const now = new Date();
         const premiumUntil = plan === "annual"
           ? new Date(now.setFullYear(now.getFullYear() + 1)).toISOString()
           : new Date(now.setMonth(now.getMonth() + 1)).toISOString();
-
         const amount = plan === "annual" ? 50000 : 5000;
 
-        await supabase
-          .from("users")
-          .update({
-            is_premium: true,
-            premium_until: premiumUntil,
-            premium_plan: plan,
-            premium_warned_3d: false,
-            premium_warned_1d: false
-          })
-          .eq("phone_number", targetPhone);
+        await supabase.from("users").update({
+          is_premium: true, premium_until: premiumUntil, premium_plan: plan,
+          premium_warned_3d: false, premium_warned_1d: false
+        }).eq("phone_number", targetPhone);
 
-        await supabase
-          .from("payments")
-          .update({ status: "approved", plan, amount })
-          .eq("user_id", targetUser.id)
-          .eq("status", "pending");
+        await supabase.from("payments").update({ status: "approved", plan, amount })
+          .eq("user_id", targetUser.id).eq("status", "pending");
 
         const planLabel = plan === "annual" ? "Annual (1 year)" : "Monthly (1 month)";
-        const expiryLabel = new Date(premiumUntil).toLocaleDateString("en-GB", {
-          day: "numeric", month: "short", year: "numeric"
-        });
+        const expiryLabel = new Date(premiumUntil).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
-        await sendReply(
-          targetPhone,
-          `🎉 You're now a Premium user!
+        await sendReply(targetPhone,
+`🎉 You're now a Premium user!
 
 Plan: ${planLabel}
 Expires: ${expiryLabel}
@@ -527,188 +554,90 @@ add car
 history month
 upgrade`
         );
-
         await sendReply(from, `✅ ${targetUser.name} (${targetPhone}) approved on ${plan} plan. Expires: ${expiryLabel}`);
         return res.sendStatus(200);
       }
 
+      // REJECT
       if (text.toLowerCase().startsWith("reject ")) {
         const targetPhone = text.split(" ")[1]?.trim();
+        if (!targetPhone) { await sendReply(from, `Usage: reject 255XXXXXXXXX`); return res.sendStatus(200); }
 
-        if (!targetPhone) {
-          await sendReply(from, `Usage: reject 255XXXXXXXXX`);
-          return res.sendStatus(200);
-        }
+        const { data: targetUser } = await supabase.from("users").select("*").eq("phone_number", targetPhone).single();
+        if (!targetUser) { await sendReply(from, `❌ No user found: ${targetPhone}`); return res.sendStatus(200); }
 
-        const { data: targetUser } = await supabase
-          .from("users")
-          .select("*")
-          .eq("phone_number", targetPhone)
-          .single();
-
-        if (!targetUser) {
-          await sendReply(from, `❌ No user found with phone: ${targetPhone}`);
-          return res.sendStatus(200);
-        }
-
-        await supabase
-          .from("payments")
-          .update({ status: "rejected" })
-          .eq("user_id", targetUser.id)
-          .eq("status", "pending");
-
-        await sendReply(
-          targetPhone,
-          `Sorry, we couldn't verify your payment.
-
-Please double-check your transaction ID and try again:
-
-paid <transaction_id>
-
-Example:
-paid QHG72K3
-
-Or contact us at contact@carlogbook.app for help.`
+        await supabase.from("payments").update({ status: "rejected" }).eq("user_id", targetUser.id).eq("status", "pending");
+        await sendReply(targetPhone,
+          `Sorry, we couldn't verify your payment.\n\nPlease double-check your transaction ID and try again:\n\npaid <transaction_id>\n\nOr contact us at contact@carlogbook.app for help.`
         );
-
-        await sendReply(from, `❌ Payment rejected for ${targetUser.name} (${targetPhone}). User has been notified.`);
+        await sendReply(from, `❌ Payment rejected for ${targetUser.name} (${targetPhone}).`);
         return res.sendStatus(200);
       }
 
-      // ── ADMIN: DOWNGRADE ────────────────────────────────────────────────
+      // DOWNGRADE
       if (text.toLowerCase().startsWith("downgrade ")) {
         const targetPhone = text.split(" ")[1]?.trim();
+        if (!targetPhone) { await sendReply(from, `Usage: downgrade 255XXXXXXXXX`); return res.sendStatus(200); }
 
-        if (!targetPhone) {
-          await sendReply(from, `Usage: downgrade 255XXXXXXXXX`);
-          return res.sendStatus(200);
-        }
+        const { data: targetUser } = await supabase.from("users").select("*").eq("phone_number", targetPhone).single();
+        if (!targetUser) { await sendReply(from, `❌ No user found: ${targetPhone}`); return res.sendStatus(200); }
 
-        const { data: targetUser } = await supabase
-          .from("users")
-          .select("*")
-          .eq("phone_number", targetPhone)
-          .single();
+        await supabase.from("users").update({
+          is_premium: false, is_lifetime: false, premium_until: null, premium_plan: null,
+          premium_warned_3d: false, premium_warned_1d: false
+        }).eq("phone_number", targetPhone);
 
-        if (!targetUser) {
-          await sendReply(from, `❌ No user found with phone: ${targetPhone}`);
-          return res.sendStatus(200);
-        }
-
-        await supabase
-          .from("users")
-          .update({
-            is_premium: false,
-            is_lifetime: false,
-            premium_until: null,
-            premium_plan: null,
-            premium_warned_3d: false,
-            premium_warned_1d: false
-          })
-          .eq("phone_number", targetPhone);
-
-        await sendReply(from, `✅ ${targetUser.name} (${targetPhone}) has been downgraded to free.`);
+        await sendReply(from, `✅ ${targetUser.name} (${targetPhone}) downgraded to free.`);
         return res.sendStatus(200);
       }
 
-      // ── ADMIN: EXTEND ───────────────────────────────────────────────────
+      // EXTEND
       if (text.toLowerCase().startsWith("extend ")) {
         const targetPhone = text.split(" ")[1]?.trim();
+        if (!targetPhone) { await sendReply(from, `Usage: extend 255XXXXXXXXX`); return res.sendStatus(200); }
 
-        if (!targetPhone) {
-          await sendReply(from, `Usage: extend 255XXXXXXXXX`);
-          return res.sendStatus(200);
-        }
+        const { data: targetUser } = await supabase.from("users").select("*").eq("phone_number", targetPhone).single();
+        if (!targetUser) { await sendReply(from, `❌ No user found: ${targetPhone}`); return res.sendStatus(200); }
+        if (!targetUser.is_premium) { await sendReply(from, `⚠️ ${targetUser.name} is not premium. Use approve instead.`); return res.sendStatus(200); }
 
-        const { data: targetUser } = await supabase
-          .from("users")
-          .select("*")
-          .eq("phone_number", targetPhone)
-          .single();
-
-        if (!targetUser) {
-          await sendReply(from, `❌ No user found with phone: ${targetPhone}`);
-          return res.sendStatus(200);
-        }
-
-        if (!targetUser.is_premium) {
-          await sendReply(from, `⚠️ ${targetUser.name} is not a premium user. Use approve instead.`);
-          return res.sendStatus(200);
-        }
-
-        const base = targetUser.premium_until
-          ? new Date(targetUser.premium_until)
-          : new Date();
+        const base = targetUser.premium_until ? new Date(targetUser.premium_until) : new Date();
         const newExpiry = new Date(base.setMonth(base.getMonth() + 1)).toISOString();
 
-        await supabase
-          .from("users")
-          .update({
-            premium_until: newExpiry,
-            premium_warned_3d: false,
-            premium_warned_1d: false
-          })
-          .eq("phone_number", targetPhone);
+        await supabase.from("users").update({
+          premium_until: newExpiry, premium_warned_3d: false, premium_warned_1d: false
+        }).eq("phone_number", targetPhone);
 
-        const expiryLabel = new Date(newExpiry).toLocaleDateString("en-GB", {
-          day: "numeric", month: "short", year: "numeric"
-        });
-
-        await sendReply(targetPhone,
-          `⭐ Good news! Your Car Logbook Premium has been extended.\n\nNew expiry: ${expiryLabel}\n\nThank you for being a valued member! 🙏`
-        );
-
-        await sendReply(from, `✅ ${targetUser.name} (${targetPhone}) extended by 1 month. New expiry: ${expiryLabel}`);
+        const expiryLabel = new Date(newExpiry).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+        await sendReply(targetPhone, `⭐ Good news! Your Car Logbook Premium has been extended.\n\nNew expiry: ${expiryLabel}\n\nThank you for being a valued member! 🙏`);
+        await sendReply(from, `✅ ${targetUser.name} extended by 1 month. New expiry: ${expiryLabel}`);
         return res.sendStatus(200);
       }
 
-      // ── ADMIN: USER LOOKUP ──────────────────────────────────────────────
+      // USER LOOKUP
       if (text.toLowerCase().startsWith("user ")) {
         const targetPhone = text.split(" ")[1]?.trim();
+        if (!targetPhone) { await sendReply(from, `Usage: user 255XXXXXXXXX`); return res.sendStatus(200); }
 
-        if (!targetPhone) {
-          await sendReply(from, `Usage: user 255XXXXXXXXX`);
-          return res.sendStatus(200);
-        }
-
-        const { data: targetUser } = await supabase
-          .from("users")
-          .select("*")
-          .eq("phone_number", targetPhone)
-          .single();
-
-        if (!targetUser) {
-          await sendReply(from, `❌ No user found with phone: ${targetPhone}`);
-          return res.sendStatus(200);
-        }
+        const { data: targetUser } = await supabase.from("users").select("*").eq("phone_number", targetPhone).single();
+        if (!targetUser) { await sendReply(from, `❌ No user found: ${targetPhone}`); return res.sendStatus(200); }
 
         const { data: userCarLinks } = await supabase
-          .from("car_users")
-          .select("car_id, cars (car_name, plate_number)")
-          .eq("user_id", targetUser.id);
+          .from("car_users").select("car_id, cars (car_name, plate_number)").eq("user_id", targetUser.id);
 
-        const { count: totalLogs } = await supabase
-          .from("logs")
+        const { count: totalLogs } = await supabase.from("logs")
           .select("*", { count: "exact", head: true })
           .in("car_id", (userCarLinks || []).map(l => l.car_id));
 
-        const joined = new Date(targetUser.created_at).toLocaleDateString("en-GB", {
-          day: "numeric", month: "short", year: "numeric"
-        });
+        const joined = new Date(targetUser.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
         let planStatus = "Free";
-        if (targetUser.is_lifetime) {
-          planStatus = "Lifetime ⭐";
-        } else if (targetUser.is_premium && targetUser.premium_until) {
-          const expiry = new Date(targetUser.premium_until).toLocaleDateString("en-GB", {
-            day: "numeric", month: "short", year: "numeric"
-          });
+        if (targetUser.is_lifetime) planStatus = "Lifetime ⭐";
+        else if (targetUser.is_premium && targetUser.premium_until) {
+          const expiry = new Date(targetUser.premium_until).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
           planStatus = `Premium (${targetUser.premium_plan || "monthly"}) — expires ${expiry}`;
         }
 
-        const carList = (userCarLinks || [])
-          .map(l => `  • ${l.cars.car_name} (${l.cars.plate_number})`)
-          .join("\n") || "  None";
+        const carList = (userCarLinks || []).map(l => `  • ${l.cars.car_name} (${l.cars.plate_number})`).join("\n") || "  None";
 
         await sendReply(from,
 `👤 User Lookup
@@ -717,6 +646,7 @@ Name: ${targetUser.name}
 Phone: ${targetPhone}
 Joined: ${joined}
 Plan: ${planStatus}
+City: ${targetUser.city || "Not set"}
 Cars: ${userCarLinks?.length || 0}
 ${carList}
 Total logs: ${totalLogs || 0}`
@@ -724,90 +654,47 @@ Total logs: ${totalLogs || 0}`
         return res.sendStatus(200);
       }
 
-      // ── ADMIN: CAR LOOKUP ───────────────────────────────────────────────
+      // CAR LOOKUP
       if (text.toLowerCase().startsWith("car ")) {
         const plateRaw = text.split(" ")[1]?.trim().toUpperCase().replace(/\s+/g, "");
+        if (!plateRaw) { await sendReply(from, `Usage: car T123ABC`); return res.sendStatus(200); }
 
-        if (!plateRaw) {
-          await sendReply(from, `Usage: car T123ABC`);
-          return res.sendStatus(200);
-        }
+        const { data: carData } = await supabase.from("cars").select("*").eq("plate_number", plateRaw).single();
+        if (!carData) { await sendReply(from, `❌ No car found: ${plateRaw}`); return res.sendStatus(200); }
 
-        const { data: carData } = await supabase
-          .from("cars")
-          .select("*")
-          .eq("plate_number", plateRaw)
-          .single();
+        const { data: owners } = await supabase.from("car_users").select("user_id, users (name, phone_number)").eq("car_id", carData.id);
+        const { count: totalLogs } = await supabase.from("logs").select("*", { count: "exact", head: true }).eq("car_id", carData.id);
 
-        if (!carData) {
-          await sendReply(from, `❌ No car found with plate: ${plateRaw}`);
-          return res.sendStatus(200);
-        }
+        const { data: lastMileage } = await supabase.from("logs").select("mileage, created_at")
+          .eq("car_id", carData.id).eq("type", "mileage").order("created_at", { ascending: false }).limit(1).single();
+        const { data: lastFuel } = await supabase.from("logs").select("amount, created_at")
+          .eq("car_id", carData.id).eq("type", "fuel").order("created_at", { ascending: false }).limit(1).single();
 
-        const { data: owners } = await supabase
-          .from("car_users")
-          .select("user_id, users (name, phone_number)")
-          .eq("car_id", carData.id);
-
-        const { count: totalLogs } = await supabase
-          .from("logs")
-          .select("*", { count: "exact", head: true })
-          .eq("car_id", carData.id);
-
-        const { data: lastMileage } = await supabase
-          .from("logs")
-          .select("mileage, created_at")
-          .eq("car_id", carData.id)
-          .eq("type", "mileage")
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .single();
-
-        const { data: lastFuel } = await supabase
-          .from("logs")
-          .select("amount, created_at")
-          .eq("car_id", carData.id)
-          .eq("type", "fuel")
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .single();
-
-        const ownerList = (owners || [])
-          .map(o => `  • ${o.users.name} (${o.users.phone_number})`)
-          .join("\n") || "  None";
-
-        const lastMileageStr = lastMileage
-          ? `${lastMileage.mileage?.toLocaleString()} km`
-          : "No mileage logged";
-
-        const lastFuelStr = lastFuel
-          ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(lastFuel.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`
-          : "No fuel logged";
+        const ownerList = (owners || []).map(o => `  • ${o.users.name} (${o.users.phone_number})`).join("\n") || "  None";
 
         await sendReply(from,
 `🚗 Car Lookup
 
 Plate: ${carData.plate_number}
 Name: ${carData.car_name}
+Fuel type: ${carData.fuel_type || "Not set"}
 Registered: ${new Date(carData.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
 
 Owners:
 ${ownerList}
 
 Total logs: ${totalLogs || 0}
-Last mileage: ${lastMileageStr}
-Last fuel: ${lastFuelStr}`
+Last mileage: ${lastMileage ? `${lastMileage.mileage?.toLocaleString()} km` : "No mileage logged"}
+Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(lastFuel.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}` : "No fuel logged"}`
         );
         return res.sendStatus(200);
       }
 
-      // ── ADMIN: PENDING PAYMENTS ─────────────────────────────────────────
+      // PENDING
       if (text.toLowerCase() === "pending") {
         const { data: pendingPayments } = await supabase
-          .from("payments")
-          .select("*, users (name, phone_number)")
-          .eq("status", "pending")
-          .order("created_at", { ascending: false });
+          .from("payments").select("*, users (name, phone_number)")
+          .eq("status", "pending").order("created_at", { ascending: false });
 
         if (!pendingPayments || !pendingPayments.length) {
           await sendReply(from, `✅ No pending payments right now.`);
@@ -816,27 +703,19 @@ Last fuel: ${lastFuelStr}`
 
         let msg = `💰 Pending Payments (${pendingPayments.length})\n\n`;
         pendingPayments.forEach((p, i) => {
-          const date = new Date(p.created_at).toLocaleDateString("en-GB", {
-            day: "numeric", month: "short"
-          });
-          msg += `${i + 1}. ${p.users.name} (${p.users.phone_number})\n`;
-          msg += `   TID: ${p.transaction_id}\n`;
-          msg += `   Submitted: ${date}\n\n`;
+          const date = new Date(p.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+          msg += `${i + 1}. ${p.users.name} (${p.users.phone_number})\n   TID: ${p.transaction_id}\n   Submitted: ${date}\n\n`;
         });
-
         msg += `To approve:\napprove 255XXXXXXXXX\napprove 255XXXXXXXXX annual`;
         await sendReply(from, msg);
         return res.sendStatus(200);
       }
 
-      // ── ADMIN: RECENT PAYMENTS ──────────────────────────────────────────
+      // PAYMENTS
       if (text.toLowerCase() === "payments") {
         const { data: recentPayments } = await supabase
-          .from("payments")
-          .select("*, users (name, phone_number)")
-          .eq("status", "approved")
-          .order("created_at", { ascending: false })
-          .limit(10);
+          .from("payments").select("*, users (name, phone_number)")
+          .eq("status", "approved").order("created_at", { ascending: false }).limit(10);
 
         if (!recentPayments || !recentPayments.length) {
           await sendReply(from, `No approved payments yet.`);
@@ -845,44 +724,24 @@ Last fuel: ${lastFuelStr}`
 
         let msg = `✅ Recent Payments (last ${recentPayments.length})\n\n`;
         recentPayments.forEach((p, i) => {
-          const date = new Date(p.created_at).toLocaleDateString("en-GB", {
-            day: "numeric", month: "short", year: "numeric"
-          });
+          const date = new Date(p.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
           const planStr = p.plan ? ` — ${p.plan}` : "";
           const amountStr = p.amount ? ` (${p.amount.toLocaleString()} TZS)` : "";
-          msg += `${i + 1}. ${p.users.name} (${p.users.phone_number})\n`;
-          msg += `   ${date}${planStr}${amountStr}\n\n`;
+          msg += `${i + 1}. ${p.users.name} (${p.users.phone_number})\n   ${date}${planStr}${amountStr}\n\n`;
         });
-
         await sendReply(from, msg);
         return res.sendStatus(200);
       }
 
-      // ── ADMIN: STATS ────────────────────────────────────────────────────
+      // STATS
       if (text.toLowerCase() === "stats") {
-        const { count: totalUsers } = await supabase
-          .from("users")
-          .select("*", { count: "exact", head: true });
-
-        const { count: premiumUsers } = await supabase
-          .from("users")
-          .select("*", { count: "exact", head: true })
-          .eq("is_premium", true);
-
-        const { count: totalLogs } = await supabase
-          .from("logs")
-          .select("*", { count: "exact", head: true });
-
+        const { count: totalUsers }      = await supabase.from("users").select("*", { count: "exact", head: true });
+        const { count: premiumUsers }    = await supabase.from("users").select("*", { count: "exact", head: true }).eq("is_premium", true);
+        const { count: totalLogs }       = await supabase.from("logs").select("*", { count: "exact", head: true });
+        const { count: usersWithCity }   = await supabase.from("users").select("*", { count: "exact", head: true }).not("city", "is", null);
         const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-        const { count: newUsersThisWeek } = await supabase
-          .from("users")
-          .select("*", { count: "exact", head: true })
-          .gte("created_at", oneWeekAgo);
-
-        const { count: pendingCount } = await supabase
-          .from("payments")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "pending");
+        const { count: newUsersThisWeek } = await supabase.from("users").select("*", { count: "exact", head: true }).gte("created_at", oneWeekAgo);
+        const { count: pendingCount }    = await supabase.from("payments").select("*", { count: "exact", head: true }).eq("status", "pending");
 
         await sendReply(from,
 `📊 Car Logbook Stats
@@ -891,44 +750,164 @@ Last fuel: ${lastFuelStr}`
 ⭐ Premium users: ${premiumUsers || 0}
 🆕 New this week: ${newUsersThisWeek || 0}
 📋 Total logs: ${totalLogs || 0}
-💰 Pending payments: ${pendingCount || 0}`
+💰 Pending payments: ${pendingCount || 0}
+📍 Users with city: ${usersWithCity || 0}`
         );
         return res.sendStatus(200);
       }
 
-      // ── ADMIN: BROADCAST ────────────────────────────────────────────────
+      // BROADCAST
       if (text.toLowerCase().startsWith("broadcast ")) {
         const broadcastMessage = text.slice(10).trim();
+        if (!broadcastMessage) { await sendReply(from, `Usage: broadcast <your message>`); return res.sendStatus(200); }
 
-        if (!broadcastMessage) {
-          await sendReply(from, `Usage: broadcast <your message>`);
-          return res.sendStatus(200);
-        }
-
-        const { data: allUsers } = await supabase
-          .from("users")
-          .select("phone_number, name");
-
-        if (!allUsers || !allUsers.length) {
-          await sendReply(from, `No users to broadcast to.`);
-          return res.sendStatus(200);
-        }
+        const { data: allUsers } = await supabase.from("users").select("phone_number, name");
+        if (!allUsers || !allUsers.length) { await sendReply(from, `No users to broadcast to.`); return res.sendStatus(200); }
 
         await sendReply(from, `📡 Sending broadcast to ${allUsers.length} users...`);
-
-        let sent = 0;
-        let failed = 0;
+        let sent = 0, failed = 0;
         for (const u of allUsers) {
+          try { await sendReply(u.phone_number, broadcastMessage); sent++; }
+          catch (e) { console.error(`Broadcast failed for ${u.phone_number}:`, e.message); failed++; }
+        }
+        await sendReply(from, `✅ Broadcast complete.\nSent: ${sent}\nFailed: ${failed}`);
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: EWURA SET PRICES ─────────────────────────────────────────
+      // Usage: ewura arusha 2973 2967 3042  |  ewura dar 2864 2858 2932
+      if (text.toLowerCase().startsWith("ewura ") &&
+          !text.toLowerCase().startsWith("ewura broadcast") &&
+          !text.toLowerCase().startsWith("ewura status")) {
+
+        const parts = text.trim().split(/\s+/);
+        if (parts.length < 5) {
+          await sendReply(from, `Usage: ewura <city> <petrol> <diesel> <kerosene>\n\nExamples:\newura arusha 2973 2967 3042\newura dar 2864 2858 2932`);
+          return res.sendStatus(200);
+        }
+
+        const kerosene = parseInt(parts[parts.length - 1]);
+        const diesel   = parseInt(parts[parts.length - 2]);
+        const petrol   = parseInt(parts[parts.length - 3]);
+        const cityRaw  = parts.slice(1, parts.length - 3).join(" ").toLowerCase().trim();
+
+        const cityAliases = {
+          "dar": "dar es salaam",
+          "dares salaam": "dar es salaam",
+          "dar es salaam": "dar es salaam",
+          "arusha": "arusha",
+          "dodoma": "dodoma",
+          "mwanza": "mwanza",
+          "mbeya": "mbeya",
+          "moshi": "moshi",
+          "tanga": "tanga"
+        };
+        const city = cityAliases[cityRaw] || cityRaw;
+
+        if (isNaN(petrol) || isNaN(diesel) || isNaN(kerosene)) {
+          await sendReply(from, `❌ Invalid prices. Last 3 values must be numbers.\n\nExample:\newura arusha 2973 2967 3042`);
+          return res.sendStatus(200);
+        }
+
+        const nowDate = new Date();
+        const monthKey = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, "0")}`;
+
+        const { data: existing } = await supabase.from("fuel_prices").select("id").eq("month", monthKey).eq("city", city).single();
+
+        if (existing) {
+          await supabase.from("fuel_prices").update({ petrol, diesel, kerosene }).eq("id", existing.id);
+        } else {
+          await supabase.from("fuel_prices").insert({ month: monthKey, city, petrol, diesel, kerosene });
+        }
+
+        await sendReply(from,
+          `✅ EWURA prices saved — ${city} (${monthKey})\n\nPetrol: ${petrol.toLocaleString()} TZS/L\nDiesel: ${diesel.toLocaleString()} TZS/L\nKerosene: ${kerosene.toLocaleString()} TZS/L\n\nWhen ready to send:\newura broadcast`
+        );
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: EWURA STATUS ─────────────────────────────────────────────
+      if (text.toLowerCase() === "ewura status") {
+        const nowDate = new Date();
+        const monthKey = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, "0")}`;
+        const monthLabel = nowDate.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+
+        const { data: prices } = await supabase.from("fuel_prices").select("*").eq("month", monthKey).order("city");
+
+        if (!prices || prices.length === 0) {
+          await sendReply(from, `⛽ EWURA Status — ${monthLabel}\n\nNo prices entered yet.\n\nEnter prices:\newura arusha 2973 2967 3042`);
+          return res.sendStatus(200);
+        }
+
+        let msg = `⛽ EWURA Prices — ${monthLabel}\n\n`;
+        for (const p of prices) {
+          msg += `📍 ${p.city.charAt(0).toUpperCase() + p.city.slice(1)}\n`;
+          msg += `   Petrol: ${p.petrol?.toLocaleString()}\n`;
+          msg += `   Diesel: ${p.diesel?.toLocaleString()}\n`;
+          msg += `   Kerosene: ${p.kerosene?.toLocaleString()}\n\n`;
+        }
+        msg += `To broadcast:\newura broadcast`;
+        await sendReply(from, msg);
+        return res.sendStatus(200);
+      }
+
+      // ── ADMIN: EWURA BROADCAST ──────────────────────────────────────────
+      if (text.toLowerCase() === "ewura broadcast") {
+        const nowDate = new Date();
+        const monthKey = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, "0")}`;
+        const monthLabel = nowDate.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+
+        const { data: prices } = await supabase.from("fuel_prices").select("*").eq("month", monthKey);
+
+        if (!prices || prices.length === 0) {
+          await sendReply(from, `❌ No EWURA prices entered for ${monthLabel}.\n\nEnter prices first:\newura arusha 2973 2967 3042`);
+          return res.sendStatus(200);
+        }
+
+        // Build price map
+        const priceMap = {};
+        for (const p of prices) priceMap[p.city.toLowerCase().trim()] = p;
+
+        // National highlights (first 5 cities entered)
+        const highlights = prices.slice(0, 5).map(p =>
+          `📍 ${p.city.charAt(0).toUpperCase() + p.city.slice(1)}: Petrol ${p.petrol?.toLocaleString()} | Diesel ${p.diesel?.toLocaleString()}`
+        ).join("\n");
+
+        const { data: allUsers } = await supabase.from("users").select("*");
+        await sendReply(from, `📡 Sending EWURA broadcast to ${allUsers?.length || 0} users...`);
+
+        let sent = 0, failed = 0;
+
+        for (const u of allUsers || []) {
           try {
-            await sendReply(u.phone_number, broadcastMessage);
+            const userCity = u.city ? u.city.toLowerCase().trim() : null;
+            const cityPrice = userCity ? priceMap[userCity] : null;
+
+            let msg = `⛽ EWURA Fuel Prices — ${monthLabel}\n\n`;
+
+            if (cityPrice) {
+              msg += `📍 ${u.city}\n`;
+              msg += `Petrol: ${cityPrice.petrol?.toLocaleString()} TZS/L\n`;
+              msg += `Diesel: ${cityPrice.diesel?.toLocaleString()} TZS/L\n`;
+              msg += `Kerosene: ${cityPrice.kerosene?.toLocaleString()} TZS/L\n`;
+            } else {
+              msg += `${highlights}\n`;
+              if (!userCity) {
+                msg += `\n📍 Set your city for local prices:\nmy city Arusha`;
+              }
+            }
+
+            msg += `\n─────────────────\nSource: EWURA Tanzania\nEffective: ${monthLabel}`;
+
+            await sendReply(u.phone_number, msg);
             sent++;
           } catch (e) {
-            console.error(`Broadcast failed for ${u.phone_number}:`, e.message);
+            console.error(`EWURA broadcast failed for ${u.phone_number}:`, e.message);
             failed++;
           }
         }
 
-        await sendReply(from, `✅ Broadcast complete.\nSent: ${sent}\nFailed: ${failed}`);
+        await sendReply(from, `✅ EWURA broadcast complete.\nSent: ${sent}\nFailed: ${failed}`);
         return res.sendStatus(200);
       }
 
@@ -958,13 +937,21 @@ Stats:
 Broadcast:
 • broadcast <msg> — send to all users
 
-EWURA (coming soon):
-• ewura petrol 3250 diesel 3100 kerosene 2800`
+EWURA:
+• ewura <city> <p> <d> <k> — enter prices
+• ewura status — see entered prices
+• ewura broadcast — send to all users
+
+Monthly cron:
+• GET /cron/monthly?secret=... — send summaries`
         );
         return res.sendStatus(200);
       }
-
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // USER COMMANDS
+    // ─────────────────────────────────────────────────────────────────────
 
     const userCars = await getUserCars(user.id);
 
@@ -975,50 +962,89 @@ EWURA (coming soon):
       carId = user.active_car_id;
     } else {
       const { data: carLink } = await supabase
-        .from("car_users")
-        .select("car_id")
-        .eq("user_id", user.id)
-        .limit(1)
-        .single();
+        .from("car_users").select("car_id").eq("user_id", user.id).limit(1).single();
       carId = carLink?.car_id || null;
     }
 
     // ── DETECT CAR NAME IN MESSAGE ────────────────────────────────────────
     let detectedCars = [];
     userCars.forEach(car => {
-      if (text.toLowerCase().includes(car.car_name)) {
-        detectedCars.push(car);
-      }
+      if (text.toLowerCase().includes(car.car_name)) detectedCars.push(car);
     });
 
     if (detectedCars.length > 1) {
-      let options = detectedCars.map(car => `• ${car.car_name}`).join("\n");
-      reply = `I found a few cars in your message — which one did you mean?\n\n${options}\n\nTip: Include the car name clearly, e.g:\nfuel 40k rav4`;
-      await sendReply(from, reply);
+      const options = detectedCars.map(car => `• ${car.car_name}`).join("\n");
+      await sendReply(from, `I found a few cars in your message — which one did you mean?\n\n${options}\n\nTip: Include the car name clearly, e.g:\nfuel 40k rav4`);
       return res.sendStatus(200);
     }
 
-    if (detectedCars.length === 1) {
-      carId = detectedCars[0].id;
+    if (detectedCars.length === 1) carId = detectedCars[0].id;
+
+    // ── MY CITY ───────────────────────────────────────────────────────────
+    if (text.toLowerCase().startsWith("my city ")) {
+      const newCity = text.slice(8).trim();
+
+      if (!newCity) {
+        await sendReply(from, `Please include your city name.\n\nExample:\nmy city Arusha`);
+        return res.sendStatus(200);
+      }
+
+      // Already has a city → premium to change
+      if (user.city && PREMIUM_ENABLED && !isPremium(user)) {
+        await sendReply(from,
+          `⭐ Changing your city is a Premium feature.\n\nYour current city: ${user.city}\n\nUpgrade to update it: upgrade`
+        );
+        return res.sendStatus(200);
+      }
+
+      await supabase.from("users").update({ city: newCity }).eq("id", user.id);
+      await sendReply(from, `✅ City updated to ${newCity}.\n\nI'll now show you local fuel prices and city-specific updates.`);
+      return res.sendStatus(200);
+    }
+
+    // ── ONBOARDING: CITY STEP ─────────────────────────────────────────────
+    if (user.onboarding_step === "awaiting_city") {
+      const lower = text.toLowerCase().trim();
+
+      if (lower === "skip") {
+        await supabase.from("users").update({ onboarding_step: "awaiting_fuel_type" }).eq("id", user.id);
+        await sendReply(from,
+          `No problem!\n\nOne more quick question:\n\n⛽ What fuel does your car use?\n\nReply: petrol or diesel\n\n(or "skip" to skip)`
+        );
+        return res.sendStatus(200);
+      }
+
+      await supabase.from("users").update({ city: text.trim(), onboarding_step: "awaiting_fuel_type" }).eq("id", user.id);
+      await sendReply(from,
+        `✅ Got it — ${text.trim()}!\n\nOne more quick question:\n\n⛽ What fuel does your car use?\n\nReply: petrol or diesel\n\n(or "skip" to skip)`
+      );
+      return res.sendStatus(200);
+    }
+
+    // ── ONBOARDING: FUEL TYPE STEP ────────────────────────────────────────
+    if (user.onboarding_step === "awaiting_fuel_type") {
+      const lower = text.toLowerCase().trim();
+      const fuelType = (lower === "petrol" || lower === "diesel") ? lower : null;
+
+      await supabase.from("users").update({ onboarding_step: null }).eq("id", user.id);
+
+      if (fuelType && carId) {
+        await supabase.from("cars").update({ fuel_type: fuelType }).eq("id", carId);
+      }
+
+      const fuelMsg = fuelType ? `Fuel type saved: ${fuelType}.` : `No problem, you can always update this later.`;
+
+      await sendReply(from,
+        `✅ ${fuelMsg}\n\nYou're all set! Here's how to get started:\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history\n\nType "help" anytime.`
+      );
+      return res.sendStatus(200);
     }
 
     // ── START ─────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "start") {
-      reply = `🚗 Car Logbook
-
-Hey ${user.name}! Here's what you can do:
-
-⛽ Log fuel → fuel 40k
-🔧 Log maintenance → oil change 120k
-📏 Log mileage → mileage 30402
-📒 View history → history
-🚗 View your cars → cars
-➕ Add a new car → add car
-
-Type "help" anytime you need a reminder.
-💬 Have feedback? feedback <your message>`;
-
-      await sendReply(from, reply);
+      await sendReply(from,
+        `🚗 Car Logbook\n\nHey ${user.name}! Here's what you can do:\n\n⛽ Log fuel → fuel 40k\n🔧 Log maintenance → oil change 120k\n📏 Log mileage → mileage 30402\n📒 View history → history\n🚗 View your cars → cars\n➕ Add a new car → add car\n\nType "help" anytime you need a reminder.\n💬 Have feedback? feedback <your message>`
+      );
       return res.sendStatus(200);
     }
 
@@ -1027,33 +1053,22 @@ Type "help" anytime you need a reminder.
 
     if (greetings.includes(text.toLowerCase())) {
       const hasCars = userCars.length > 0;
-
       if (!hasCars) {
-        reply = `👋 Hey ${user.name}! Good to have you here.
-
-It looks like you haven't added a car yet. Let's fix that!
-
-What's your car's plate number?
-
-Example: T123ABC`;
+        await sendReply(from,
+          `👋 Hey ${user.name}! Good to have you here.\n\nIt looks like you haven't added a car yet. Let's fix that!\n\nWhat's your car's plate number?\n\nExample: T123ABC`
+        );
       } else {
-        reply = `👋 Hey ${user.name}! Ready to log something?
-
-⛽ fuel 40k
-🔧 oil change 120k
-📏 mileage 30402
-📒 history
-
-Type "help" to see all commands.`;
+        await sendReply(from,
+          `👋 Hey ${user.name}! Ready to log something?\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history\n\nType "help" to see all commands.`
+        );
       }
-
-      await sendReply(from, reply);
       return res.sendStatus(200);
     }
 
     // ── HELP ──────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "help") {
-      reply = `🚗 Car Logbook — Quick Guide
+      await sendReply(from,
+`🚗 Car Logbook — Quick Guide
 
 Logging:
 ⛽ fuel 40k
@@ -1075,75 +1090,50 @@ Cars:
 ➕ add car → register a new car ${PREMIUM_ENABLED ? "(Premium after 1st car)" : ""}
 🔄 switch to rav4 → change active car
 
+Settings:
+📍 my city Arusha → local fuel prices ${PREMIUM_ENABLED ? "(free to set, Premium to change)" : ""}
+
 Other:
 ↩️ undo → remove last log
 ⭐ upgrade → go Premium
 💬 feedback <message> → send us feedback
 
-Tip: Just type what you did naturally — I'll figure out the rest!`;
-
-      await sendReply(from, reply);
+Tip: Just type what you did naturally — I'll figure out the rest!`
+      );
       return res.sendStatus(200);
     }
 
-    // ── FEEDBACK COMMAND ──────────────────────────────────────────────────
+    // ── FEEDBACK ──────────────────────────────────────────────────────────
     if (text.toLowerCase().startsWith("feedback ")) {
       const feedbackMessage = text.slice(9).trim();
 
       if (!feedbackMessage) {
-        reply = `Please include your message after "feedback".\n\nExample:\nfeedback the bot didn't understand my message`;
-        await sendReply(from, reply);
+        await sendReply(from, `Please include your message after "feedback".\n\nExample:\nfeedback the bot didn't understand my message`);
         return res.sendStatus(200);
       }
 
-      await supabase.from("feedback").insert({
-        user_id: user.id,
-        message: feedbackMessage
-      });
-
-      await sendReply(
-        ADMIN_PHONE,
-        `💬 User Feedback
-
-User: ${user.name}
-Phone: ${from}
-
-Message:
-${feedbackMessage}`
+      await supabase.from("feedback").insert({ user_id: user.id, message: feedbackMessage });
+      await sendReply(ADMIN_PHONE,
+        `💬 User Feedback\n\nUser: ${user.name}\nPhone: ${from}\n\nMessage:\n${feedbackMessage}`
       );
-
-      reply = `Thanks for the feedback, ${user.name}! 🙏
-
-We read every message and use it to make Car Logbook better.`;
-
-      await sendReply(from, reply);
+      await sendReply(from, `Thanks for the feedback, ${user.name}! 🙏\n\nWe read every message and use it to make Car Logbook better.`);
       return res.sendStatus(200);
     }
 
-    // ── UPGRADE COMMAND ───────────────────────────────────────────────────
+    // ── UPGRADE ───────────────────────────────────────────────────────────
     if (text.toLowerCase() === "upgrade") {
-
       if (isActivePremiumUser(user)) {
         const expiryDate = user.premium_until
-          ? new Date(user.premium_until).toLocaleDateString("en-GB", {
-              day: "numeric",
-              month: "short",
-              year: "numeric"
-            })
+          ? new Date(user.premium_until).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
           : null;
-
         const planLabel = user.premium_plan === "annual" ? "Annual" : "Monthly";
 
-        reply = `⭐ You're already a Premium user!
-
-Your Premium features are active:
-• Multiple cars
-• Full history access
-• More coming soon
-${expiryDate ? `\nPlan: ${planLabel}\nRenews on: ${expiryDate}` : ""}
-Thank you for supporting Car Logbook! 🙏`;
+        await sendReply(from,
+          `⭐ You're already a Premium user!\n\nYour Premium features are active:\n• Multiple cars\n• Full history access\n• More coming soon\n${expiryDate ? `\nPlan: ${planLabel}\nRenews on: ${expiryDate}` : ""}\nThank you for supporting Car Logbook! 🙏`
+        );
       } else {
-        reply = `⭐ Car Logbook Premium
+        await sendReply(from,
+`⭐ Car Logbook Premium
 
 Monthly: 5,000 TZS/month
 Annual: 50,000 TZS/year (save 10,000 TZS)
@@ -1153,6 +1143,7 @@ What you get:
 ✅ Full history (last 10, monthly, per car)
 ✅ Insurance expiry reminders
 ✅ Monthly expense summary
+✅ City-specific fuel prices
 ✅ More features coming soon
 
 ─────────────────
@@ -1172,124 +1163,64 @@ How to upgrade:
    paid QHG72K3
 ─────────────────
 
-Questions? contact@carlogbook.app`;
+Questions? contact@carlogbook.app`
+        );
       }
-
-      await sendReply(from, reply);
       return res.sendStatus(200);
     }
 
-    // ── PAID COMMAND ──────────────────────────────────────────────────────
+    // ── PAID ──────────────────────────────────────────────────────────────
     if (text.toLowerCase().startsWith("paid ")) {
       const rawText = text.slice(5).trim();
-
       let txnId = null;
-
       const words = rawText.split(" ");
+
       if (words.length <= 2) {
         txnId = words[0].trim().toUpperCase();
       } else {
-        console.log("Extracting TID from SMS via AI...");
         const extracted = await extractTransactionId(rawText);
         if (extracted) {
           txnId = extracted.toUpperCase();
-          console.log("AI extracted TID:", txnId);
         } else {
-          reply = `I couldn't find a transaction ID in that message.
-
-Please send just the transaction ID:
-
-paid QHG72K3
-
-Or contact us at contact@carlogbook.app if you need help.`;
-          await sendReply(from, reply);
+          await sendReply(from,
+            `I couldn't find a transaction ID in that message.\n\nPlease send just the transaction ID:\n\npaid QHG72K3\n\nOr contact us at contact@carlogbook.app if you need help.`
+          );
           return res.sendStatus(200);
         }
       }
 
       if (!txnId) {
-        reply = `Please include your transaction ID.\n\nExample:\npaid QHG72K3`;
-        await sendReply(from, reply);
+        await sendReply(from, `Please include your transaction ID.\n\nExample:\npaid QHG72K3`);
         return res.sendStatus(200);
       }
 
       const { data: existingPending } = await supabase
-        .from("payments")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("status", "pending")
-        .single();
+        .from("payments").select("*").eq("user_id", user.id).eq("status", "pending").single();
 
       if (existingPending) {
-        reply = `You already have a pending payment (${existingPending.transaction_id}).
-
-We'll notify you once it's verified. This usually takes a few hours.
-
-Made a mistake? Type: cancel payment
-
-Questions? contact@carlogbook.app`;
-        await sendReply(from, reply);
-        return res.sendStatus(200);
-      }
-
-      const { data: duplicateTxn } = await supabase
-        .from("payments")
-        .select("*")
-        .eq("transaction_id", txnId)
-        .single();
-
-      if (duplicateTxn) {
-        reply = `⚠️ That transaction ID has already been submitted.
-
-If you think this is a mistake, contact us at:
-contact@carlogbook.app`;
-        await sendReply(from, reply);
-
-        await sendReply(
-          ADMIN_PHONE,
-          `⚠️ Duplicate Transaction ID Alert
-
-User: ${user.name}
-Phone: ${from}
-Transaction ID: ${txnId}
-
-This ID was already used. Do NOT approve without verifying.`
+        await sendReply(from,
+          `You already have a pending payment (${existingPending.transaction_id}).\n\nWe'll notify you once it's verified. This usually takes a few hours.\n\nMade a mistake? Type: cancel payment\n\nQuestions? contact@carlogbook.app`
         );
         return res.sendStatus(200);
       }
 
-      await supabase.from("payments").insert({
-        user_id: user.id,
-        transaction_id: txnId,
-        status: "pending"
-      });
+      const { data: duplicateTxn } = await supabase.from("payments").select("*").eq("transaction_id", txnId).single();
 
-      reply = `✅ Got it! Your payment is being verified.
+      if (duplicateTxn) {
+        await sendReply(from, `⚠️ That transaction ID has already been submitted.\n\nIf you think this is a mistake, contact us at:\ncontact@carlogbook.app`);
+        await sendReply(ADMIN_PHONE,
+          `⚠️ Duplicate Transaction ID Alert\n\nUser: ${user.name}\nPhone: ${from}\nTransaction ID: ${txnId}\n\nThis ID was already used. Do NOT approve without verifying.`
+        );
+        return res.sendStatus(200);
+      }
 
-Transaction ID: ${txnId}
-
-You'll receive a confirmation message shortly.
-
-Made a mistake? Type: cancel payment
-
-Questions? contact@carlogbook.app`;
-      await sendReply(from, reply);
-
-      await sendReply(
-        ADMIN_PHONE,
-        `💰 Premium Payment Request
-
-User: ${user.name}
-Phone: ${from}
-Transaction ID: ${txnId}
-
-To approve:
-approve ${from}
-
-To reject:
-reject ${from}`
+      await supabase.from("payments").insert({ user_id: user.id, transaction_id: txnId, status: "pending" });
+      await sendReply(from,
+        `✅ Got it! Your payment is being verified.\n\nTransaction ID: ${txnId}\n\nYou'll receive a confirmation message shortly.\n\nMade a mistake? Type: cancel payment\n\nQuestions? contact@carlogbook.app`
       );
-
+      await sendReply(ADMIN_PHONE,
+        `💰 Premium Payment Request\n\nUser: ${user.name}\nPhone: ${from}\nTransaction ID: ${txnId}\n\nTo approve:\napprove ${from}\n\nTo reject:\nreject ${from}`
+      );
       return res.sendStatus(200);
     }
 
@@ -1298,94 +1229,47 @@ reject ${from}`
       const cars = await getUserCars(user.id);
 
       if (!cars.length) {
-        reply = `🚗 You haven't added any cars yet.\n\nSend your plate number to get started.\n\nExample: T123ABC`;
+        await sendReply(from, `🚗 You haven't added any cars yet.\n\nSend your plate number to get started.\n\nExample: T123ABC`);
       } else {
         let messageText = "🚗 Your Cars\n\n";
 
         for (const car of cars) {
           const isActive = car.id === carId;
 
-          const { data: lastFuel } = await supabase
-            .from("logs")
-            .select("amount, created_at")
-            .eq("car_id", car.id)
-            .eq("type", "fuel")
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .single();
-
-          const { data: lastMileage } = await supabase
-            .from("logs")
-            .select("mileage, created_at")
-            .eq("car_id", car.id)
-            .eq("type", "mileage")
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .single();
-
-          const { count: totalLogs } = await supabase
-            .from("logs")
-            .select("*", { count: "exact", head: true })
-            .eq("car_id", car.id);
+          const { data: lastFuel } = await supabase.from("logs").select("amount, created_at")
+            .eq("car_id", car.id).eq("type", "fuel").order("created_at", { ascending: false }).limit(1).single();
+          const { data: lastMileage } = await supabase.from("logs").select("mileage, created_at")
+            .eq("car_id", car.id).eq("type", "mileage").order("created_at", { ascending: false }).limit(1).single();
+          const { count: totalLogs } = await supabase.from("logs")
+            .select("*", { count: "exact", head: true }).eq("car_id", car.id);
 
           messageText += `${isActive ? "▶" : "•"} ${car.car_name} — ${car.plate_number}${isActive ? " (active)" : ""}\n`;
-
-          if (lastMileage) {
-            messageText += `   📏 ${lastMileage.mileage?.toLocaleString()} km\n`;
-          }
-
+          if (lastMileage) messageText += `   📏 ${lastMileage.mileage?.toLocaleString()} km\n`;
           if (lastFuel) {
-            const fuelDate = new Date(lastFuel.created_at).toLocaleDateString("en-GB", {
-              day: "numeric",
-              month: "short"
-            });
+            const fuelDate = new Date(lastFuel.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
             messageText += `   ⛽ ${lastFuel.amount?.toLocaleString()} TZS (${fuelDate})\n`;
           }
-
-          if (totalLogs > 0) {
-            messageText += `   📋 ${totalLogs} log${totalLogs === 1 ? "" : "s"} total\n`;
-          }
-
+          if (totalLogs > 0) messageText += `   📋 ${totalLogs} log${totalLogs === 1 ? "" : "s"} total\n`;
           messageText += "\n";
         }
 
-        messageText += `To log against a specific car:\nfuel 40k rav4\n\n`;
-        messageText += `To switch active car:\nswitch to rav4\n\n`;
-        messageText += `➕ Add another car: add car`;
-        reply = messageText;
+        messageText += `To log against a specific car:\nfuel 40k rav4\n\nTo switch active car:\nswitch to rav4\n\n➕ Add another car: add car`;
+        await sendReply(from, messageText);
       }
-
-      await sendReply(from, reply);
       return res.sendStatus(200);
     }
 
     // ── ADD CAR ───────────────────────────────────────────────────────────
     if (text.toLowerCase() === "add car") {
-
       if (PREMIUM_ENABLED && userCars.length >= 1 && !isPremium(user)) {
-        reply = `⭐ Adding multiple cars is a Premium feature.
-
-You're currently on the free plan which includes 1 car.
-
-Upgrade for 5,000 TZS/month to add unlimited cars.
-
-Type: upgrade`;
-        await sendReply(from, reply);
+        await sendReply(from,
+          `⭐ Adding multiple cars is a Premium feature.\n\nYou're currently on the free plan which includes 1 car.\n\nUpgrade for 5,000 TZS/month to add unlimited cars.\n\nType: upgrade`
+        );
         return res.sendStatus(200);
       }
 
-      await supabase
-        .from("users")
-        .update({ pending_plate: "AWAITING" })
-        .eq("id", user.id);
-
-      reply = `➕ Let's add a new car.
-
-What's the plate number?
-
-Example: T456DEF`;
-
-      await sendReply(from, reply);
+      await supabase.from("users").update({ pending_plate: "AWAITING" }).eq("id", user.id);
+      await sendReply(from, `➕ Let's add a new car.\n\nWhat's the plate number?\n\nExample: T456DEF`);
       return res.sendStatus(200);
     }
 
@@ -1394,10 +1278,8 @@ Example: T456DEF`;
     const switchMatch = switchPhrases.find(p => text.toLowerCase().startsWith(p));
 
     if (switchMatch) {
-
       if (PREMIUM_ENABLED && !isPremium(user)) {
-        reply = `⭐ Switching between cars is a Premium feature.\n\nType: upgrade`;
-        await sendReply(from, reply);
+        await sendReply(from, `⭐ Switching between cars is a Premium feature.\n\nType: upgrade`);
         return res.sendStatus(200);
       }
 
@@ -1405,62 +1287,47 @@ Example: T456DEF`;
       const matchedCar = userCars.find(car => car.car_name === carName);
 
       if (!matchedCar) {
-        reply = `I couldn't find a car named "${carName}".\n\nYour cars:\n`;
-        userCars.forEach(car => { reply += `• ${car.car_name}\n`; });
-        reply += `\nExample:\nswitch to rav4`;
-        await sendReply(from, reply);
+        let notFoundReply = `I couldn't find a car named "${carName}".\n\nYour cars:\n`;
+        userCars.forEach(car => { notFoundReply += `• ${car.car_name}\n`; });
+        notFoundReply += `\nExample:\nswitch to rav4`;
+        await sendReply(from, notFoundReply);
         return res.sendStatus(200);
       }
 
       await setActiveCar(user.id, matchedCar.id);
-
-      reply = `✅ Active car switched to ${matchedCar.car_name}.
-
-Logs will now go to ${matchedCar.car_name} by default.
-
-To log:
-fuel 40k
-mileage 30402`;
-
-      await sendReply(from, reply);
+      await sendReply(from,
+        `✅ Active car switched to ${matchedCar.car_name}.\n\nLogs will now go to ${matchedCar.car_name} by default.\n\nTo log:\nfuel 40k\nmileage 30402`
+      );
       return res.sendStatus(200);
     }
 
     // ── UNDO ──────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "undo") {
       if (!carId) {
-        reply = `Hmm, I couldn't find a car to undo a log for.\n\nMake sure you have a car registered:\ncars`;
-        await sendReply(from, reply);
+        await sendReply(from, `Hmm, I couldn't find a car to undo a log for.\n\nMake sure you have a car registered:\ncars`);
         return res.sendStatus(200);
       }
 
-      // ── RATE LIMIT: undo (free users, 3/day) ──────────────────────────
       if (PREMIUM_ENABLED && !isPremium(user)) {
         const allowed = await checkLimit(user.id, "undo_count");
         if (!allowed) {
-          reply = `You've used your 3 undos for today — the limit resets tomorrow.
-
-Upgrade for unlimited undos:
-upgrade`;
-          await sendReply(from, reply);
+          await sendReply(from, `You've used your 3 undos for today — the limit resets tomorrow.\n\nUpgrade for unlimited undos:\nupgrade`);
           return res.sendStatus(200);
         }
         await incrementUsage(user.id, "undo_count");
       }
 
       const deleted = await deleteLastLog(carId);
-      reply = deleted
+      await sendReply(from, deleted
         ? `↩️ Done! Your last log has been removed.`
-        : `Nothing to undo — there are no logs yet for this car.`;
-
-      await sendReply(from, reply);
+        : `Nothing to undo — there are no logs yet for this car.`
+      );
       return res.sendStatus(200);
     }
 
     // ── HISTORY ───────────────────────────────────────────────────────────
     if (text.toLowerCase().startsWith("history")) {
       const parts = text.toLowerCase().split(" ");
-
       let historyCarName = null;
       let command = null;
 
@@ -1473,25 +1340,19 @@ upgrade`;
 
       if (PREMIUM_ENABLED && !isPremium(user)) {
         if (command === "10" || command === "month" || historyCarName) {
-          reply = `⭐ This is a Premium feature.
-
-Extended history and per-car history are available on Premium.
-
-Type: upgrade`;
-          await sendReply(from, reply);
+          await sendReply(from,
+            `⭐ This is a Premium feature.\n\nExtended history and per-car history are available on Premium.\n\nType: upgrade`
+          );
           return res.sendStatus(200);
         }
       }
 
-      // ── RATE LIMIT: history (free users, 3/day) ────────────────────────
       if (PREMIUM_ENABLED && !isPremium(user)) {
         const allowed = await checkLimit(user.id, "history_count");
         if (!allowed) {
-          reply = `You've checked your history 3 times today — the limit resets tomorrow.
-
-Upgrade for unlimited history access:
-upgrade`;
-          await sendReply(from, reply);
+          await sendReply(from,
+            `You've checked your history 3 times today — the limit resets tomorrow.\n\nUpgrade for unlimited history access:\nupgrade`
+          );
           return res.sendStatus(200);
         }
         await incrementUsage(user.id, "history_count");
@@ -1499,12 +1360,11 @@ upgrade`;
 
       if (historyCarName) {
         const matchedCar = userCars.find(car => car.car_name === historyCarName);
-
         if (!matchedCar) {
-          reply = `I couldn't find a car named "${historyCarName}".\n\nYour cars:\n`;
-          userCars.forEach(car => { reply += `• ${car.car_name}\n`; });
-          reply += `\nTry: history ${userCars[0]?.car_name || "rav4"}`;
-          await sendReply(from, reply);
+          let notFoundReply = `I couldn't find a car named "${historyCarName}".\n\nYour cars:\n`;
+          userCars.forEach(car => { notFoundReply += `• ${car.car_name}\n`; });
+          notFoundReply += `\nTry: history ${userCars[0]?.car_name || "rav4"}`;
+          await sendReply(from, notFoundReply);
           return res.sendStatus(200);
         }
         carId = matchedCar.id;
@@ -1516,7 +1376,6 @@ upgrade`;
       } else if (command === "month") {
         logs = await getLogsThisMonth(carId);
       } else {
-        // Free users see last 3 logs, premium users see last 5
         const historyLimit = (PREMIUM_ENABLED && !isPremium(user)) ? 3 : 5;
         logs = await getRecentLogs(carId, historyLimit);
       }
@@ -1525,30 +1384,20 @@ upgrade`;
       const activeCarName = activeCar ? activeCar.car_name : "your car";
 
       if (!logs.length) {
-        reply = `📒 No logs found for ${activeCarName}${command === "month" ? " this month" : ""}.\n\nStart logging:\nfuel 40k`;
+        await sendReply(from, `📒 No logs found for ${activeCarName}${command === "month" ? " this month" : ""}.\n\nStart logging:\nfuel 40k`);
       } else {
         let messageText = `📒 ${activeCarName} — Recent Logs\n\n`;
 
         logs.forEach(log => {
-          const date = new Date(log.created_at);
-          const formattedDate = date.toLocaleDateString("en-GB", {
-            day: "numeric",
-            month: "short"
-          });
-
+          const formattedDate = new Date(log.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
           let line = "";
-          if (log.type === "fuel") {
-            line = `⛽ Fuel — ${log.amount?.toLocaleString()} TZS`;
-          } else if (log.type === "maintenance") {
+          if (log.type === "fuel") line = `⛽ Fuel — ${log.amount?.toLocaleString()} TZS`;
+          else if (log.type === "maintenance") {
             const label = log.subtype ? subtypeLabel(log.subtype) : null;
             line = `🔧 ${label || "Maintenance"} — ${log.amount?.toLocaleString()} TZS`;
-          } else if (log.type === "mileage") {
-            line = `📏 Mileage — ${log.mileage?.toLocaleString()} km`;
-          } else if (log.type === "insurance") {
-            line = `💰 Insurance — ${log.amount?.toLocaleString()} TZS`;
-          } else {
-            line = `💸 ${log.description}`;
-          }
+          } else if (log.type === "mileage") line = `📏 Mileage — ${log.mileage?.toLocaleString()} km`;
+          else if (log.type === "insurance") line = `💰 Insurance — ${log.amount?.toLocaleString()} TZS`;
+          else line = `💸 ${log.description}`;
 
           messageText += `${formattedDate}\n${line}\n\n`;
         });
@@ -1569,23 +1418,18 @@ upgrade`;
         const otherCars = userCars.filter(car => car.id !== carId);
         if (otherCars.length > 0) {
           messageText += `\nOther cars:\n`;
-          otherCars.forEach(car => {
-            messageText += `history ${car.car_name} → ${car.car_name} logs\n`;
-          });
+          otherCars.forEach(car => { messageText += `history ${car.car_name} → ${car.car_name} logs\n`; });
         }
 
-        reply = messageText;
+        await sendReply(from, messageText);
       }
-
-      await sendReply(from, reply);
       return res.sendStatus(200);
     }
 
     // ── INSURANCE EXPIRY ──────────────────────────────────────────────────
     if (text.toLowerCase().startsWith("insurance expiry ")) {
       if (!carId) {
-        reply = `You need to have a car registered to set an insurance expiry date.\n\nType: cars`;
-        await sendReply(from, reply);
+        await sendReply(from, `You need to have a car registered to set an insurance expiry date.\n\nType: cars`);
         return res.sendStatus(200);
       }
 
@@ -1593,65 +1437,38 @@ upgrade`;
       const parsed = new Date(datePart);
 
       if (isNaN(parsed.getTime())) {
-        reply = `I couldn't read that date. Please use a clear format.\n\nExamples:\ninsurance expiry 15 Aug 2026\ninsurance expiry 2026-08-15`;
-        await sendReply(from, reply);
+        await sendReply(from, `I couldn't read that date. Please use a clear format.\n\nExamples:\ninsurance expiry 15 Aug 2026\ninsurance expiry 2026-08-15`);
         return res.sendStatus(200);
       }
 
       const expiryDate = parsed.toISOString().split("T")[0];
-
-      // upsert — one record per car
-      const { data: existing } = await supabase
-        .from("car_insurance")
-        .select("id")
-        .eq("car_id", carId)
-        .single();
+      const { data: existing } = await supabase.from("car_insurance").select("id").eq("car_id", carId).single();
 
       if (existing) {
-        await supabase
-          .from("car_insurance")
-          .update({
-            expiry_date: expiryDate,
-            notified_30d: false,
-            notified_7d: false,
-            notified_1d: false
-          })
-          .eq("car_id", carId);
+        await supabase.from("car_insurance").update({
+          expiry_date: expiryDate, notified_30d: false, notified_7d: false, notified_1d: false
+        }).eq("car_id", carId);
       } else {
-        await supabase
-          .from("car_insurance")
-          .insert({ car_id: carId, expiry_date: expiryDate });
+        await supabase.from("car_insurance").insert({ car_id: carId, expiry_date: expiryDate });
       }
 
       const activeCar = userCars.find(car => car.id === carId);
       const carName = activeCar ? activeCar.car_name : "your car";
+      const displayDate = parsed.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
-      const displayDate = parsed.toLocaleDateString("en-GB", {
-        day: "numeric", month: "short", year: "numeric"
-      });
-
-      reply = `✅ Insurance expiry saved for ${carName}.
-
-Expiry date: ${displayDate}${PREMIUM_ENABLED && !isPremium(user)
-  ? "\n\nReminders at 30, 7, and 1 day before expiry are a Premium feature.\n\nType: upgrade"
-  : "\n\nI'll remind you 30 days, 7 days, and 1 day before it expires."}`;
-
-      await sendReply(from, reply);
+      await sendReply(from,
+        `✅ Insurance expiry saved for ${carName}.\n\nExpiry date: ${displayDate}${PREMIUM_ENABLED && !isPremium(user)
+          ? "\n\nReminders at 30, 7, and 1 day before expiry are a Premium feature.\n\nType: upgrade"
+          : "\n\nI'll remind you 30 days, 7 days, and 1 day before it expires."}`
+      );
       return res.sendStatus(200);
     }
 
     // ── PLATE NUMBER DETECTED ─────────────────────────────────────────────
     if (isPlateNumber(text)) {
       const plate = text.trim().replace(/\s+/g, "").toUpperCase();
-
-      await supabase
-        .from("users")
-        .update({ pending_plate: plate })
-        .eq("id", user.id);
-
-      reply = `Got it — ${plate} ✅\n\nWhat would you like to call this car?\n\nExamples:\nRav4\nDad's car\nWork car`;
-
-      await sendReply(from, reply);
+      await supabase.from("users").update({ pending_plate: plate }).eq("id", user.id);
+      await sendReply(from, `Got it — ${plate} ✅\n\nWhat would you like to call this car?\n\nExamples:\nRav4\nDad's car\nWork car`);
       return res.sendStatus(200);
     }
 
@@ -1660,109 +1477,100 @@ Expiry date: ${displayDate}${PREMIUM_ENABLED && !isPremium(user)
       const mileage = extractMileage(text);
 
       if (mileage) {
-        // ── RATE LIMIT: log (free users, 10/day) ────────────────────────
         if (PREMIUM_ENABLED && !isPremium(user)) {
           const allowed = await checkLimit(user.id, "log_count");
           if (!allowed) {
-            reply = `You've reached today's free limit of 10 logs — the limit resets tomorrow.
-
-Upgrade for unlimited logging:
-upgrade`;
-            await sendReply(from, reply);
+            await sendReply(from, `You've reached today's free limit of 10 logs — the limit resets tomorrow.\n\nUpgrade for unlimited logging:\nupgrade`);
             return res.sendStatus(200);
           }
           await incrementUsage(user.id, "log_count");
         }
 
+        // Check if first mileage log for baseline prompt
+        const { count: mileageCount } = await supabase
+          .from("logs").select("*", { count: "exact", head: true })
+          .eq("car_id", carId).eq("type", "mileage");
+
         await saveLog(carId, "mileage", null, `Mileage ${mileage}`, mileage);
         reply = `📏 Mileage logged — ${mileage.toLocaleString()} km`;
+
+        if (mileageCount === 0) {
+          reply += `\n\n📌 Tip: Keep logging mileage regularly and I'll track your total km driven each month in your monthly summary.`;
+        }
       }
 
       await sendReply(from, reply);
       return res.sendStatus(200);
     }
 
-    // ── CAR NAME STEP (after plate) ───────────────────────────────────────
+    // ── CAR NAME STEP (after plate number entered) ────────────────────────
     if (user.pending_plate && user.pending_plate !== "AWAITING") {
       const carName = text.trim().toLowerCase();
       const plate = user.pending_plate;
 
       const { data: existingName } = await supabase
-        .from("car_users")
-        .select(`car_id, cars (car_name)`)
-        .eq("user_id", user.id);
+        .from("car_users").select(`car_id, cars (car_name)`).eq("user_id", user.id);
 
       const nameExists = existingName?.some(row => row.cars.car_name === carName);
 
       if (nameExists) {
-        reply = `You already have a car named "${carName}".\n\nPlease choose a different name.\n\nExamples:\n${carName} 2\nwork ${carName}`;
-        await sendReply(from, reply);
+        await sendReply(from,
+          `You already have a car named "${carName}".\n\nPlease choose a different name.\n\nExamples:\n${carName} 2\nwork ${carName}`
+        );
         return res.sendStatus(200);
       }
 
-      const { data: existingPlate } = await supabase
-        .from("cars")
-        .select("plate_number")
-        .eq("plate_number", plate)
-        .single();
+      const { data: existingPlate } = await supabase.from("cars").select("plate_number").eq("plate_number", plate).single();
 
       if (existingPlate) {
-        reply = `⚠️ That plate number is already registered in the system.\n\nIf this is your car, contact us at contact@carlogbook.app to claim ownership.`;
-        await sendReply(from, reply);
+        await sendReply(from, `⚠️ That plate number is already registered in the system.\n\nIf this is your car, contact us at contact@carlogbook.app to claim ownership.`);
         await supabase.from("users").update({ pending_plate: null }).eq("id", user.id);
         return res.sendStatus(200);
       }
 
       const car = await registerCar(user.id, plate, carName);
 
-      if (userCars.length === 0) {
-        await setActiveCar(user.id, car.id);
-      }
+      if (userCars.length === 0) await setActiveCar(user.id, car.id);
 
       await supabase.from("users").update({ pending_plate: null }).eq("id", user.id);
 
       const isFirstCar = userCars.length === 0;
 
-      reply = `🎉 You're all set, ${user.name}!
+      if (isFirstCar) {
+        // Start city onboarding
+        await supabase.from("users").update({ onboarding_step: "awaiting_city" }).eq("id", user.id);
 
-${carName} (${plate}) has been added to your logbook.
+        await sendReply(from,
+`🎉 ${carName} (${plate}) added!
 
-Now you can start tracking:
+Quick setup — which city are you in?
 
-⛽ fuel 40k
-🔧 oil change 120k
-📏 mileage 30402
+This helps me show you local fuel prices each month.
 
-Type "help" anytime you need a reminder.${isFirstCar ? "\n\nTip: You can add more cars anytime with: add car" : ""}
+Reply with your city (e.g. Arusha, Dar es Salaam, Mwanza)
 
-💬 Got thoughts or suggestions? feedback <your message>`;
-
-      await sendReply(from, reply);
+Or type "skip" to skip.`
+        );
+      } else {
+        await sendReply(from,
+          `✅ ${carName} (${plate}) has been added to your logbook.\n\nTo switch to this car:\nswitch to ${carName}`
+        );
+      }
       return res.sendStatus(200);
     }
 
-    // ── AWAITING PLATE (after "add car" command) ──────────────────────────
+    // ── AWAITING PLATE ────────────────────────────────────────────────────
     if (user.pending_plate === "AWAITING") {
       if (!isPlateNumber(text)) {
-        reply = `That doesn't look like a valid plate number.
-
-Tanzanian plates look like: T123ABC
-
-Please try again or type "cancel" to go back.`;
-        await sendReply(from, reply);
+        await sendReply(from,
+          `That doesn't look like a valid plate number.\n\nTanzanian plates look like: T123ABC\n\nPlease try again or type "cancel" to go back.`
+        );
         return res.sendStatus(200);
       }
 
       const plate = text.trim().replace(/\s+/g, "").toUpperCase();
-
-      await supabase
-        .from("users")
-        .update({ pending_plate: plate })
-        .eq("id", user.id);
-
-      reply = `Got it — ${plate} ✅\n\nWhat would you like to call this car?\n\nExamples:\nPremio\nWork car\nDad's car`;
-
-      await sendReply(from, reply);
+      await supabase.from("users").update({ pending_plate: plate }).eq("id", user.id);
+      await sendReply(from, `Got it — ${plate} ✅\n\nWhat would you like to call this car?\n\nExamples:\nPremio\nWork car\nDad's car`);
       return res.sendStatus(200);
     }
 
@@ -1771,38 +1579,23 @@ Please try again or type "cancel" to go back.`;
     const { type, subtype } = detectType(text);
 
     if (amount && carId && looksLikeLog(text)) {
-
-      // ── RATE LIMIT: log (free users, 10/day) ──────────────────────────
       if (PREMIUM_ENABLED && !isPremium(user)) {
         const allowed = await checkLimit(user.id, "log_count");
         if (!allowed) {
-          reply = `You've reached today's free limit of 10 logs — the limit resets tomorrow.
-
-Upgrade for unlimited logging:
-upgrade`;
-          await sendReply(from, reply);
+          await sendReply(from, `You've reached today's free limit of 10 logs — the limit resets tomorrow.\n\nUpgrade for unlimited logging:\nupgrade`);
           return res.sendStatus(200);
         }
         await incrementUsage(user.id, "log_count");
       }
 
-      const { count } = await supabase
-        .from("logs")
-        .select("*", { count: "exact", head: true })
-        .eq("car_id", carId);
+      const { count } = await supabase.from("logs").select("*", { count: "exact", head: true }).eq("car_id", carId);
 
       await saveLog(carId, type, amount, text, null, subtype);
 
       const isFirstLog = count === 0;
 
       if (isFirstLog) {
-        reply = `🎉 First log saved — you're off to a great start!
-
-Keep going:
-⛽ fuel 40k
-🔧 oil change 120k
-📏 mileage 30402
-📒 history`;
+        reply = `🎉 First log saved — you're off to a great start!\n\nKeep going:\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history`;
       } else {
         const carUsed = userCars.find(car => car.id === carId);
         const carName = carUsed ? carUsed.car_name : "your car";
@@ -1817,31 +1610,14 @@ Keep going:
         const isMilestone = count > 0 && (count + 1) % 10 === 0;
 
         if (isMilestone) {
-          reply = `✅ Log saved
-
-Car: ${carName}
-${typeLabel}: ${amount.toLocaleString()} TZS
-
-🙌 ${count + 1} logs and counting — great job staying on top of your car expenses!
-
-💬 Enjoying Car Logbook? We'd love to hear from you:
-feedback <your message>`;
+          reply = `✅ Log saved\n\nCar: ${carName}\n${typeLabel}: ${amount.toLocaleString()} TZS\n\n🙌 ${count + 1} logs and counting — great job staying on top of your car expenses!\n\n💬 Enjoying Car Logbook? We'd love to hear from you:\nfeedback <your message>`;
         } else {
-          reply = `✅ Log saved
-
-Car: ${carName}
-${typeLabel}: ${amount.toLocaleString()} TZS`;
+          reply = `✅ Log saved\n\nCar: ${carName}\n${typeLabel}: ${amount.toLocaleString()} TZS`;
         }
 
-        // ── POST-INSURANCE EXPIRY PROMPT ───────────────────────────────
-        // Only prompt if this was an insurance log and no expiry date is set yet
+        // Post-insurance expiry prompt
         if (type === "insurance") {
-          const { data: existingInsurance } = await supabase
-            .from("car_insurance")
-            .select("id")
-            .eq("car_id", carId)
-            .single();
-
+          const { data: existingInsurance } = await supabase.from("car_insurance").select("id").eq("car_id", carId).single();
           if (!existingInsurance) {
             reply += `\n\nWould you like to set a reminder for when it expires?\n\nJust send the date:\ninsurance expiry 15 Aug 2026`;
           }
@@ -1855,26 +1631,9 @@ ${typeLabel}: ${amount.toLocaleString()} TZS`;
     // ── AI SMART FALLBACK ─────────────────────────────────────────────────
     const aiReply = await getAIFallbackReply(text, userCars);
 
-    if (aiReply) {
-      reply = aiReply;
-    } else {
-      reply = `Hmm, I didn't quite get that. 🤔
-
-Here are some things you can try:
-
-⛽ fuel 40k
-🔧 oil change 120k
-📏 mileage 30402
-📒 history
-🚗 cars
-
-Or type "help" for the full guide.
-
-💬 Something not working as expected?
-feedback <your message>`;
-    }
-
-    await sendReply(from, reply);
+    await sendReply(from, aiReply ||
+      `Hmm, I didn't quite get that. 🤔\n\nHere are some things you can try:\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history\n🚗 cars\n\nOr type "help" for the full guide.\n\n💬 Something not working as expected?\nfeedback <your message>`
+    );
     res.sendStatus(200);
 
   } catch (error) {
