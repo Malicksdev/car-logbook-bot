@@ -12,6 +12,7 @@ const { extractTransactionId, getAIFallbackReply } = require("../utils/ai");
 const { handleAdminCommand } = require("./admin");
 const {
   isPremium, isActivePremiumUser, subtypeLabel,
+  normalizeServiceType, serviceTypeLabel,
   isPlateNumber, isMileage, extractMileage
 } = require("../utils/helpers");
 const { ADMIN_PHONE, PREMIUM_ENABLED, MPESA_NUMBER } = require("../config/constants");
@@ -177,7 +178,150 @@ router.post("/", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ── MY CITY ───────────────────────────────────────────────────────────
+    // ── REMIND (SERVICE INTERVAL) ─────────────────────────────────────────
+    // Usage: remind oil change every 5000km
+    //        remind oil change every 90 days
+    if (text.toLowerCase().startsWith("remind ")) {
+      if (PREMIUM_ENABLED && !isPremium(user)) {
+        await sendReply(from,
+          `⭐ Service reminders are a Premium feature.\n\nUpgrade to set reminders for oil changes, tyre rotations, and more:\nupgrade`
+        );
+        return res.sendStatus(200);
+      }
+
+      if (!carId) {
+        await sendReply(from, `You need a car registered before setting service reminders.\n\nType: cars`);
+        return res.sendStatus(200);
+      }
+
+      // Parse: remind <service type> every <number> <km|days>
+      const match = text.match(/^remind (.+?) every (\d+)\s*(km|days?)$/i);
+
+      if (!match) {
+        await sendReply(from,
+`I didn't understand that reminder format.
+
+Examples:
+remind oil change every 5000km
+remind tyre every 10000km
+remind service every 90 days
+
+To see your reminders:
+reminders list`
+        );
+        return res.sendStatus(200);
+      }
+
+      const serviceRaw = match[1].trim();
+      const intervalNum = parseInt(match[2]);
+      const intervalUnit = match[3].toLowerCase().startsWith("day") ? "days" : "km";
+      const serviceKey = normalizeServiceType(serviceRaw);
+      const label = serviceTypeLabel(serviceKey);
+
+      const reminderData = {
+        car_id: carId,
+        service_type: serviceKey,
+        interval_km:   intervalUnit === "km"   ? intervalNum : null,
+        interval_days: intervalUnit === "days" ? intervalNum : null,
+        last_serviced_at: new Date().toISOString(),
+        last_serviced_km: null,
+        notified_at: null
+      };
+
+      // Upsert — update if same car + service type already exists
+      const { data: existing } = await supabase
+        .from("service_reminders")
+        .select("id")
+        .eq("car_id", carId)
+        .eq("service_type", serviceKey)
+        .single();
+
+      if (existing) {
+        await supabase.from("service_reminders").update(reminderData).eq("id", existing.id);
+      } else {
+        await supabase.from("service_reminders").insert(reminderData);
+      }
+
+      const activeCar = userCars.find(c => c.id === carId);
+      const intervalLabel = intervalUnit === "km"
+        ? `every ${intervalNum.toLocaleString()} km`
+        : `every ${intervalNum} days`;
+
+      await sendReply(from,
+        `✅ Reminder set — ${label} for ${activeCar?.car_name || "your car"}\n\nI'll remind you ${intervalLabel}.\n\nTo see all reminders:\nreminders list\n\nTo remove it:\nreminders clear ${serviceRaw}`
+      );
+      return res.sendStatus(200);
+    }
+
+    // ── REMINDERS LIST ────────────────────────────────────────────────────
+    if (text.toLowerCase() === "reminders list") {
+      if (!carId) {
+        await sendReply(from, `No active car found.\n\nType: cars`);
+        return res.sendStatus(200);
+      }
+
+      const { data: reminders } = await supabase
+        .from("service_reminders")
+        .select("*")
+        .eq("car_id", carId)
+        .order("created_at");
+
+      const activeCar = userCars.find(c => c.id === carId);
+
+      if (!reminders || reminders.length === 0) {
+        await sendReply(from,
+          `No service reminders set for ${activeCar?.car_name || "your car"}.\n\nTo add one:\nremind oil change every 5000km`
+        );
+        return res.sendStatus(200);
+      }
+
+      let msg = `🔔 Service Reminders — ${activeCar?.car_name || "your car"}\n\n`;
+
+      for (const r of reminders) {
+        const label = serviceTypeLabel(r.service_type);
+        const interval = r.interval_km
+          ? `every ${r.interval_km.toLocaleString()} km`
+          : `every ${r.interval_days} days`;
+        const lastDone = r.last_serviced_at
+          ? new Date(r.last_serviced_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+          : "Not recorded";
+        msg += `🔧 ${label}\n   Interval: ${interval}\n   Last done: ${lastDone}\n\n`;
+      }
+
+      msg += `To remove a reminder:\nreminders clear oil change`;
+      await sendReply(from, msg);
+      return res.sendStatus(200);
+    }
+
+    // ── REMINDERS CLEAR ───────────────────────────────────────────────────
+    if (text.toLowerCase().startsWith("reminders clear ")) {
+      if (!carId) {
+        await sendReply(from, `No active car found.\n\nType: cars`);
+        return res.sendStatus(200);
+      }
+
+      const serviceRaw = text.slice(16).trim();
+      const serviceKey = normalizeServiceType(serviceRaw);
+      const label = serviceTypeLabel(serviceKey);
+
+      const { data: existing } = await supabase
+        .from("service_reminders")
+        .select("id")
+        .eq("car_id", carId)
+        .eq("service_type", serviceKey)
+        .single();
+
+      if (!existing) {
+        await sendReply(from,
+          `No reminder found for "${label}".\n\nTo see your reminders:\nreminders list`
+        );
+        return res.sendStatus(200);
+      }
+
+      await supabase.from("service_reminders").delete().eq("id", existing.id);
+      await sendReply(from, `✅ Reminder removed — ${label}.\n\nTo see remaining reminders:\nreminders list`);
+      return res.sendStatus(200);
+    }
     if (text.toLowerCase().startsWith("my city ")) {
       const newCity = text.slice(8).trim();
 
@@ -289,6 +433,7 @@ Cars:
 Settings:
 📍 my city Arusha → local fuel prices ${PREMIUM_ENABLED ? "(free to set, Premium to change)" : ""}
 🔔 reminders weekly / monthly / off → logging reminders
+🔧 remind oil change every 5000km → service reminders ${PREMIUM_ENABLED ? "(Premium)" : ""}
 
 Other:
 ↩️ undo → remove last log
@@ -814,6 +959,47 @@ Or type "skip" to skip.`
           const { data: existingInsurance } = await supabase.from("car_insurance").select("id").eq("car_id", carId).single();
           if (!existingInsurance) {
             reply += `\n\nWould you like to set a reminder for when it expires?\n\nJust send the date:\ninsurance expiry 15 Aug 2026`;
+          }
+        }
+
+        // Auto-reset service reminder when matching maintenance is logged
+        if (type === "maintenance" && subtype) {
+          // Map maintenance subtypes to service reminder keys
+          const subtypeToServiceKey = {
+            engine_oil:  "oil_change",
+            oil_filter:  "oil_filter",
+            fuel_filter: "fuel_filter",
+            air_filter:  "air_filter",
+            coolant:     "coolant",
+            gearbox_oil: "gearbox_oil",
+            battery:     "battery",
+            tyre:        "tyre",
+            brake:       "brake",
+            wiper:       "wiper",
+            service:     "service"
+          };
+          const serviceKey = subtypeToServiceKey[subtype];
+
+          if (serviceKey) {
+            // Get current mileage for this car
+            const { data: latestMileage } = await supabase
+              .from("logs").select("mileage")
+              .eq("car_id", carId).eq("type", "mileage")
+              .order("created_at", { ascending: false }).limit(1).single();
+
+            const { data: serviceReminder } = await supabase
+              .from("service_reminders").select("id")
+              .eq("car_id", carId).eq("service_type", serviceKey).single();
+
+            if (serviceReminder) {
+              await supabase.from("service_reminders").update({
+                last_serviced_at: new Date().toISOString(),
+                last_serviced_km: latestMileage?.mileage || null,
+                notified_at: null
+              }).eq("id", serviceReminder.id);
+
+              reply += `\n\n🔔 Service reminder reset — I'll remind you again when it's due.`;
+            }
           }
         }
       }

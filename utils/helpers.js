@@ -69,10 +69,57 @@ function extractMileage(text) {
   return parseInt(match[0].replace(/,/g, ""));
 }
 
+// ─── SERVICE REMINDER HELPERS ─────────────────────────────────────────────────
+
+// Maps user-friendly phrases to canonical keys
+function normalizeServiceType(text) {
+  const lower = text.toLowerCase().trim();
+  const map = {
+    "oil change":   "oil_change",
+    "engine oil":   "oil_change",
+    "oil filter":   "oil_filter",
+    "fuel filter":  "fuel_filter",
+    "air filter":   "air_filter",
+    "air cleaner":  "air_filter",
+    "coolant":      "coolant",
+    "gearbox oil":  "gearbox_oil",
+    "gearbox":      "gearbox_oil",
+    "battery":      "battery",
+    "tyres":        "tyre",
+    "tyre":         "tyre",
+    "brakes":       "brake",
+    "brake":        "brake",
+    "wiper":        "wiper",
+    "wipers":       "wiper",
+    "service":      "service",
+    "full service": "service"
+  };
+  return map[lower] || lower.replace(/\s+/g, "_");
+}
+
+function serviceTypeLabel(key) {
+  const labels = {
+    oil_change:  "Oil Change",
+    oil_filter:  "Oil Filter",
+    fuel_filter: "Fuel Filter",
+    air_filter:  "Air Filter",
+    coolant:     "Coolant",
+    gearbox_oil: "Gearbox Oil",
+    battery:     "Battery",
+    tyre:        "Tyres",
+    brake:       "Brakes",
+    wiper:       "Wiper Blades",
+    service:     "Full Service"
+  };
+  return labels[key] || key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
 module.exports = {
   isPremium,
   isActivePremiumUser,
   subtypeLabel,
+  normalizeServiceType,
+  serviceTypeLabel,
   sleep,
   reminderDays,
   isPlateNumber,

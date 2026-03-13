@@ -3,7 +3,7 @@ const router = express.Router();
 
 const supabase = require("../config/supabase");
 const { sendReply } = require("../utils/sendReply");
-const { isPremium, subtypeLabel, sleep, reminderDays } = require("../utils/helpers");
+const { isPremium, subtypeLabel, sleep, reminderDays, serviceTypeLabel } = require("../utils/helpers");
 const { ADMIN_PHONE } = require("../config/constants");
 
 // ─── CRON: CHECK PREMIUM EXPIRY + INSURANCE + INACTIVE REMINDERS ──────────────
@@ -203,7 +203,108 @@ ewura broadcast`
   }
 
   console.log(`Insurance reminders sent: ${insuranceReminders}`);
-  return res.status(200).json({ warned3, warned1, downgraded, insuranceReminders, inactiveReminders });
+
+  // ── SERVICE INTERVAL REMINDERS ─────────────────────────────────────────
+  // For each service reminder: check if km or days threshold exceeded
+  // Only fires for premium users
+  // Skips if already notified since last service reset
+
+  const { data: allReminders } = await supabase
+    .from("service_reminders")
+    .select("*, cars (id, car_name, car_users (users (id, phone_number, is_premium, is_lifetime, premium_until)))");
+
+  let serviceReminders = 0;
+
+  for (const reminder of allReminders || []) {
+    try {
+      const car = reminder.cars;
+      if (!car) continue;
+
+      for (const link of car.car_users || []) {
+        const u = link.users;
+        if (!u) continue;
+
+        // Premium only
+        const userIsPremium = u.is_lifetime || (u.is_premium && u.premium_until &&
+          new Date(u.premium_until).getTime() + 3 * 24 * 60 * 60 * 1000 > Date.now());
+        if (!userIsPremium) continue;
+
+        // Already notified since last service reset — skip
+        if (reminder.notified_at && reminder.last_serviced_at &&
+            new Date(reminder.notified_at) > new Date(reminder.last_serviced_at)) continue;
+
+        const label = serviceTypeLabel(reminder.service_type);
+        let isDue = false;
+        let dueReason = "";
+
+        // Check km-based trigger
+        if (reminder.interval_km) {
+          const { data: latestMileage } = await supabase
+            .from("logs").select("mileage")
+            .eq("car_id", car.id).eq("type", "mileage")
+            .order("created_at", { ascending: false }).limit(1).single();
+
+          if (latestMileage?.mileage && reminder.last_serviced_km) {
+            const kmSince = latestMileage.mileage - reminder.last_serviced_km;
+            if (kmSince >= reminder.interval_km) {
+              isDue = true;
+              dueReason = `${kmSince.toLocaleString()} km since last ${label.toLowerCase()}`;
+            }
+          } else if (latestMileage?.mileage && !reminder.last_serviced_km) {
+            // No last serviced km recorded — fall back to days
+          }
+        }
+
+        // Fall back to days-based trigger if no km trigger fired
+        if (!isDue && reminder.interval_days) {
+          const lastDate = reminder.last_serviced_at ? new Date(reminder.last_serviced_at) : new Date(reminder.created_at);
+          const daysSince = (now - lastDate) / (1000 * 60 * 60 * 24);
+          if (daysSince >= reminder.interval_days) {
+            isDue = true;
+            dueReason = `${Math.floor(daysSince)} days since last ${label.toLowerCase()}`;
+          }
+        }
+
+        // Also fall back to days if km interval set but no mileage logged at all
+        if (!isDue && reminder.interval_km && !reminder.last_serviced_km) {
+          const lastDate = reminder.last_serviced_at ? new Date(reminder.last_serviced_at) : new Date(reminder.created_at);
+          const daysSince = (now - lastDate) / (1000 * 60 * 60 * 24);
+          // Use a 90-day fallback if no mileage data available
+          if (daysSince >= 90) {
+            isDue = true;
+            dueReason = `over 90 days since last ${label.toLowerCase()} (no mileage data available)`;
+          }
+        }
+
+        if (!isDue) continue;
+
+        await sendReply(u.phone_number,
+`🔧 Service Reminder — ${car.car_name}
+
+Time for a ${label}!
+
+${dueReason}.
+
+Once done, log it and I'll reset your reminder:
+${reminder.service_type === "oil_change" ? "oil change" : label.toLowerCase()} <amount>
+
+To see all your reminders:
+reminders list`
+        );
+
+        await supabase.from("service_reminders")
+          .update({ notified_at: now.toISOString() })
+          .eq("id", reminder.id);
+
+        serviceReminders++;
+      }
+    } catch (err) {
+      console.error(`Service reminder error for reminder ${reminder.id}:`, err.message);
+    }
+  }
+
+  console.log(`Service reminders sent: ${serviceReminders}`);
+  return res.status(200).json({ warned3, warned1, downgraded, insuranceReminders, inactiveReminders, serviceReminders });
 });
 
 // ─── CRON: MONTHLY SUMMARY ────────────────────────────────────────────────────
