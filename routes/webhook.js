@@ -814,7 +814,15 @@ Questions? contact@carlogbook.app`
           if (log.type === "fuel") line = `⛽ Fuel — ${log.amount?.toLocaleString()} TZS`;
           else if (log.type === "maintenance") {
             const label = log.subtype ? subtypeLabel(log.subtype) : null;
-            line = `🔧 ${label || "Maintenance"} — ${log.amount?.toLocaleString()} TZS`;
+            // Show product description if it came from a photo (description is richer than just the subtype label)
+            const isPhotoDescription = log.description &&
+              log.description !== log.subtype &&
+              log.description !== label &&
+              !log.description.toLowerCase().startsWith("oil change") &&
+              !log.description.toLowerCase().startsWith("fuel") &&
+              log.description.length > 5;
+            const detail = isPhotoDescription ? ` (${log.description})` : "";
+            line = `🔧 ${label || "Maintenance"}${detail} — ${log.amount?.toLocaleString()} TZS`;
           } else if (log.type === "mileage") line = `📏 Mileage — ${log.mileage?.toLocaleString()} km`;
           else if (log.type === "insurance") line = `💰 Insurance — ${log.amount?.toLocaleString()} TZS`;
           else line = `💸 ${log.description}`;
