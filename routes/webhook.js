@@ -8,7 +8,7 @@ const { saveLog, getRecentLogs, getLogsThisMonth, deleteLastLog } = require("../
 const { parseAmount, detectType, looksLikeLog } = require("../utils/parser");
 const { sendReply } = require("../utils/sendReply");
 const { checkLimit, incrementUsage } = require("../services/usageService");
-const { extractTransactionId, getAIFallbackReply } = require("../utils/ai");
+const { extractTransactionId, getAIFallbackReply, analyzePhoto } = require("../utils/ai");
 const { handleAdminCommand } = require("./admin");
 const {
   isPremium, isActivePremiumUser, subtypeLabel,
@@ -64,9 +64,48 @@ router.post("/", async (req, res) => {
     }
 
     if (message.image) {
-      await sendReply(from,
-        `📷 Nice receipt!\n\nSaving photo receipts is a Premium feature coming soon. For now, just type the amount and I'll log it for you.\n\nExample:\nfuel 45k`
-      );
+      const { user: photoUser, isNewUser: photoIsNew } = await getOrCreateUser(from, body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || "Friend");
+
+      // Free users get upsell
+      if (PREMIUM_ENABLED && !isPremium(photoUser)) {
+        await sendReply(from,
+          `📷 Photo logging is a Premium feature.\n\nUpgrade to log expenses by photo — I'll read the receipt or product label for you.\n\nType: upgrade`
+        );
+        return res.sendStatus(200);
+      }
+
+      // Get user's cars for context
+      const photoCars = await getUserCars(photoUser.id);
+      let photoCarId = photoUser.active_car_id;
+      if (!photoCarId) {
+        const { data: carLink } = await supabase
+          .from("car_users").select("car_id").eq("user_id", photoUser.id).limit(1).single();
+        photoCarId = carLink?.car_id || null;
+      }
+
+      if (!photoCarId) {
+        await sendReply(from, `📷 Got your photo! You'll need to add a car first before logging expenses.\n\nType: add car`);
+        return res.sendStatus(200);
+      }
+
+      await sendReply(from, `📷 Analyzing your photo...`);
+
+      const imageId = message.image.id;
+      const mimeType = message.image.mime_type || "image/jpeg";
+      const analysis = await analyzePhoto(imageId, mimeType);
+
+      // Save pending_photo state with analysis result + car context
+      await supabase.from("users").update({
+        pending_photo: {
+          service_type: analysis.service_type,
+          subtype: analysis.subtype,
+          description: analysis.description,
+          confidence: analysis.confidence,
+          car_id: photoCarId
+        }
+      }).eq("id", photoUser.id);
+
+      await sendReply(from, `${analysis.prompt}\n\nOr type "cancel" to skip.`);
       return res.sendStatus(200);
     }
 
@@ -92,8 +131,47 @@ router.post("/", async (req, res) => {
 
     // ── CANCEL ────────────────────────────────────────────────────────────
     if (text.toLowerCase() === "cancel") {
-      await supabase.from("users").update({ pending_plate: null, onboarding_step: null }).eq("id", user.id);
+      await supabase.from("users").update({ pending_plate: null, onboarding_step: null, pending_photo: null }).eq("id", user.id);
       await sendReply(from, `Okay, cancelled. What would you like to do?\n\nType "help" to see all commands.`);
+      return res.sendStatus(200);
+    }
+
+    // ── PENDING PHOTO — awaiting amount confirmation ───────────────────────
+    if (user.pending_photo) {
+      const pending = user.pending_photo;
+      const amount = parseAmount(text);
+
+      if (!amount) {
+        await sendReply(from,
+          `I need the amount to log this.\n\nHow much did you pay? (e.g. 120k)\n\nOr type "cancel" to skip.`
+        );
+        return res.sendStatus(200);
+      }
+
+      const logType = ["fuel", "insurance"].includes(pending.service_type)
+        ? pending.service_type
+        : "maintenance";
+
+      const logSubtype = logType === "maintenance" ? pending.subtype : null;
+      const logDescription = pending.description || text;
+      const logCarId = pending.car_id;
+
+      await saveLog(logCarId, logType, amount, logDescription, null, logSubtype);
+      await supabase.from("users").update({
+        pending_photo: null,
+        last_log_at: new Date().toISOString()
+      }).eq("id", user.id);
+
+      const carUsed = (await getUserCars(user.id)).find(c => c.id === logCarId);
+      const carName = carUsed ? carUsed.car_name : "your car";
+      const { subtypeLabel: stLabel } = require("../utils/helpers");
+      const typeLabel = logType === "fuel" ? "Fuel"
+        : logType === "insurance" ? "Insurance"
+        : (logSubtype ? (stLabel(logSubtype) || "Maintenance") : "Maintenance");
+
+      await sendReply(from,
+        `✅ Logged from photo!\n\nCar: ${carName}\n${typeLabel}: ${amount.toLocaleString()} TZS\n\n📷 ${pending.description || "Photo attached"}`
+      );
       return res.sendStatus(200);
     }
 

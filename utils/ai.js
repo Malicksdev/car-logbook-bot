@@ -145,4 +145,103 @@ User message: "${userMessage}"`
   }
 }
 
-module.exports = { extractTransactionId, getAIFallbackReply };
+// ─── ANALYZE PHOTO ────────────────────────────────────────────────────────────
+// Downloads image from WhatsApp, sends to Claude Vision, returns structured result
+
+async function analyzePhoto(imageId, mimeType) {
+  try {
+    // Step 1: Get image download URL from WhatsApp
+    const mediaResponse = await axios.get(
+      `https://graph.facebook.com/v18.0/${imageId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
+        }
+      }
+    );
+
+    const imageUrl = mediaResponse.data.url;
+
+    // Step 2: Download the image as base64
+    const imageResponse = await axios.get(imageUrl, {
+      responseType: "arraybuffer",
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
+      }
+    });
+
+    const base64Image = Buffer.from(imageResponse.data).toString("base64");
+    const mediaType = mimeType || "image/jpeg";
+
+    // Step 3: Send to Claude Vision
+    const response = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 300,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: mediaType,
+                  data: base64Image
+                }
+              },
+              {
+                type: "text",
+                text: `You are analyzing a photo sent by a car owner in Tanzania. They are trying to log a car expense.
+
+Look at this image and identify what car-related service or product it shows.
+
+Respond ONLY with a valid JSON object in this exact format (no extra text):
+{
+  "identified": true,
+  "service_type": "oil_change",
+  "subtype": "engine_oil",
+  "description": "Engine oil (Castrol GTX)",
+  "confidence": "high",
+  "prompt": "Looks like an engine oil change! How much did you pay?"
+}
+
+service_type must be one of: fuel, oil_change, oil_filter, fuel_filter, air_filter, coolant, gearbox_oil, battery, tyre, brake, wiper, service, insurance, unknown
+subtype should match the maintenance subtype if applicable (engine_oil, oil_filter, fuel_filter, air_filter, coolant, gearbox_oil, battery, tyre, brake, wiper, service) or null for fuel/insurance/unknown
+confidence must be: high, medium, or low
+prompt should be a friendly 1-sentence question asking how much they paid
+
+If you cannot identify a car-related expense, set identified to false, service_type to "unknown", and prompt to "Got your photo! What was this for and how much did it cost? (e.g. oil change 120k)"`
+              }
+            ]
+          }
+        ]
+      },
+      {
+        headers: {
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    const raw = response.data.content[0].text.trim();
+    const clean = raw.replace(/```json|```/g, "").trim();
+    return JSON.parse(clean);
+
+  } catch (error) {
+    console.error("Photo analysis error:", error.message);
+    return {
+      identified: false,
+      service_type: "unknown",
+      subtype: null,
+      description: null,
+      confidence: "low",
+      prompt: "Got your photo! What was this for and how much did it cost? (e.g. oil change 120k)"
+    };
+  }
+}
+
+module.exports = { extractTransactionId, getAIFallbackReply, analyzePhoto };
