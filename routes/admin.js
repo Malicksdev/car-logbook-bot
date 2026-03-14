@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const supabase = require("../config/supabase");
-const { sendReply } = require("../utils/sendReply");
+const { sendReply, sendMediaReply } = require("../utils/sendReply");
 const { sleep } = require("../utils/helpers");
 const { ADMIN_PHONE, MPESA_NUMBER } = require("../config/constants");
 
@@ -275,18 +275,40 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
   }
 
   // BROADCAST
+  // Usage:
+  //   broadcast <message>                        — text only
+  //   broadcast image <url> <caption>            — image with caption
+  //   broadcast video <url> <caption>            — video with caption
   if (text.toLowerCase().startsWith("broadcast ")) {
-    const broadcastMessage = text.slice(10).trim();
-    if (!broadcastMessage) { await sendReply(from, `Usage: broadcast <your message>`); return true; }
+    const broadcastBody = text.slice(10).trim();
+    if (!broadcastBody) {
+      await sendReply(from,
+        `Usage:\nbroadcast <message>\nbroadcast image <url> <caption>\nbroadcast video <url> <caption>`
+      );
+      return true;
+    }
+
+    // Detect media broadcast
+    const mediaMatch = broadcastBody.match(/^(image|video)\s+(https?:\/\/\S+)\s*(.*)?$/i);
+    const isMedia = !!mediaMatch;
+    const mediaType = isMedia ? mediaMatch[1].toLowerCase() : null;
+    const mediaUrl  = isMedia ? mediaMatch[2] : null;
+    const mediaCaption = isMedia ? (mediaMatch[3] || "").trim() : null;
+    const textMessage = isMedia ? null : broadcastBody;
 
     const { data: allUsers } = await supabase.from("users").select("phone_number, name");
     if (!allUsers || !allUsers.length) { await sendReply(from, `No users to broadcast to.`); return true; }
 
-    await sendReply(from, `📡 Sending broadcast to ${allUsers.length} users...`);
+    await sendReply(from, `📡 Sending ${isMedia ? mediaType : "text"} broadcast to ${allUsers.length} users...`);
     let sent = 0, failed = 0;
+
     for (const u of allUsers) {
       try {
-        await sendReply(u.phone_number, broadcastMessage);
+        if (isMedia) {
+          await sendMediaReply(u.phone_number, mediaType, mediaUrl, mediaCaption);
+        } else {
+          await sendReply(u.phone_number, textMessage);
+        }
         sent++;
         await sleep(100);
       } catch (e) {
@@ -450,7 +472,9 @@ Stats:
 • stats — platform snapshot
 
 Broadcast:
-• broadcast <msg> — send to all users
+• broadcast <msg> — text to all users
+• broadcast image <url> <caption> — image to all users
+• broadcast video <url> <caption> — video to all users
 
 EWURA:
 • ewura <city> <p> <d> <k> — enter prices

@@ -1,9 +1,10 @@
 const supabase = require("../config/supabase");
 
 const LIMITS = {
-  log_count: 10,
-  history_count: 3,
-  undo_count: 3
+  log_count:        10,
+  history_count:    3,
+  undo_count:       3,
+  ai_fallback_count: 3
 };
 
 // Get today's usage row for a user (creates it if it doesn't exist)
@@ -32,7 +33,9 @@ async function getDailyUsage(userId) {
 async function checkLimit(userId, field) {
   const usage = await getDailyUsage(userId);
   if (!usage) return true; // fail open — don't block if DB error
-  return usage[field] < LIMITS[field];
+  const limit = LIMITS[field];
+  if (limit === undefined) return true; // unknown field — fail open
+  return (usage[field] || 0) < limit;
 }
 
 // Increment a usage counter for today
