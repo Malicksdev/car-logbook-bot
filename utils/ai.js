@@ -106,6 +106,13 @@ INSURANCE:
 - "insurance expiry 15 Aug 2026" — set expiry date for reminders
 - Reminders sent 30, 7, and 1 day before expiry (Premium)
 
+PHOTO LOGGING (Premium):
+- User sends a photo of a product or receipt → bot identifies it and asks for the amount
+- The product name IS saved — e.g. "Engine oil (Castrol GTX 20W-50)"
+- This description shows in history — so users CAN check what brand they used last time
+- To find it: type "history" — photo logs show the product name in brackets after the service type
+- Example history entry: "Engine Oil (Engine oil (Castrol GTX 20W-50)) — 80,000 TZS"
+
 PREMIUM:
 - "upgrade" — see plans and pricing (5,000 TZS/month or 50,000 TZS/year)
 - "paid QHG72K3" — submit M-Pesa transaction ID after paying

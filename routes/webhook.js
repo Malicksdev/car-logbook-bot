@@ -835,12 +835,8 @@ Questions? contact@carlogbook.app`
           messageText += `history ${historyCarName} 10 → last 10 logs\n`;
           messageText += `history ${historyCarName} month → this month\n`;
         } else {
-          if (command !== "10") messageText += `history 10 → last 10 logs\n`;
+          if (command !== "10")    messageText += `history 10 → last 10 logs\n`;
           if (command !== "month") messageText += `history month → this month\n`;
-          if (!command) {
-            messageText += `history 10 → last 10 logs\n`;
-            messageText += `history month → this month\n`;
-          }
         }
 
         const otherCars = userCars.filter(car => car.id !== carId);
