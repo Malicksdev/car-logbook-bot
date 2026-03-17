@@ -4,7 +4,7 @@ const LIMITS = {
   log_count:        10,
   history_count:    3,
   undo_count:       3,
-  ai_fallback_count: 3
+  ai_fallback_count: 10
 };
 
 // Get today's usage row for a user (creates it if it doesn't exist)

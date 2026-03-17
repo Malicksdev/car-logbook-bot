@@ -13,7 +13,8 @@ const { handleAdminCommand } = require("./admin");
 const {
   isPremium, isActivePremiumUser, subtypeLabel,
   normalizeServiceType, serviceTypeLabel,
-  isPlateNumber, isMileage, extractMileage
+  isPlateNumber, isMileage, extractMileage,
+  looksLikeSwahili, t
 } = require("../utils/helpers");
 const { ADMIN_PHONE, PREMIUM_ENABLED, MPESA_NUMBER } = require("../config/constants");
 
@@ -63,19 +64,18 @@ router.post("/", async (req, res) => {
       console.error("Dedup error:", dedupError.message);
     }
 
+    // ── PHOTO MESSAGES ─────────────────────────────────────────────────────
     if (message.image) {
-      const { user: photoUser, isNewUser: photoIsNew } = await getOrCreateUser(from, body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || "Friend");
+      const { user: photoUser } = await getOrCreateUser(
+        from,
+        body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || "Friend"
+      );
 
-      // Free users get upsell
       if (PREMIUM_ENABLED && !isPremium(photoUser)) {
-        await sendReply(from,
-          `📷 Photo logging is a Premium feature.\n\nUpgrade to log expenses by photo — I'll read the receipt or product label for you.\n\nType: upgrade`
-        );
+        await sendReply(from, t(photoUser, "photo_premium_required"));
         return res.sendStatus(200);
       }
 
-      // Get user's cars for context
-      const photoCars = await getUserCars(photoUser.id);
       let photoCarId = photoUser.active_car_id;
       if (!photoCarId) {
         const { data: carLink } = await supabase
@@ -84,17 +84,16 @@ router.post("/", async (req, res) => {
       }
 
       if (!photoCarId) {
-        await sendReply(from, `📷 Got your photo! You'll need to add a car first before logging expenses.\n\nType: add car`);
+        await sendReply(from, t(photoUser, "photo_no_car"));
         return res.sendStatus(200);
       }
 
-      await sendReply(from, `📷 Analyzing your photo...`);
+      await sendReply(from, t(photoUser, "photo_analyzing"));
 
       const imageId = message.image.id;
       const mimeType = message.image.mime_type || "image/jpeg";
       const analysis = await analyzePhoto(imageId, mimeType);
 
-      // Save pending_photo state with analysis result + car context
       await supabase.from("users").update({
         pending_photo: {
           service_type: analysis.service_type,
@@ -112,6 +111,7 @@ router.post("/", async (req, res) => {
     if (!message.text) return res.sendStatus(200);
 
     const text = message.text.body.trim();
+    const lower = text.toLowerCase();
     console.log("Incoming:", text);
     console.log("From:", from);
 
@@ -121,18 +121,51 @@ router.post("/", async (req, res) => {
     const { user, isNewUser } = await getOrCreateUser(from, contactName);
     let reply = "";
 
-    // ── BRAND NEW USER ────────────────────────────────────────────────────
+    // ── BRAND NEW USER — language selection first ──────────────────────────
     if (isNewUser) {
+      await supabase.from("users").update({ onboarding_step: "awaiting_language" }).eq("id", user.id);
       await sendReply(from,
-        `👋 Welcome to Car Logbook, ${user.name}!\n\nI help you track fuel, maintenance, mileage, and car expenses — right here on WhatsApp. No app needed.\n\nLet's get your car added first.\n\nWhat's your car's plate number?\n\nExample: T123ABC`
+        `👋 Welcome to Car Logbook! / Karibu Car Logbook!\n\nPlease choose your language / Tafadhali chagua lugha yako:\n\n1. English\n2. Kiswahili`
       );
       return res.sendStatus(200);
     }
 
+    // ── ONBOARDING: LANGUAGE STEP ──────────────────────────────────────────
+    // Also handles auto-detect for users who type before selecting language
+    if (user.onboarding_step === "awaiting_language") {
+      if (lower === "1" || lower === "english") {
+        await supabase.from("users").update({ language: "en", onboarding_step: null }).eq("id", user.id);
+        const updatedUser = { ...user, language: "en" };
+        await sendReply(from, t(updatedUser, "language_set_en"));
+        return res.sendStatus(200);
+      }
+
+      if (lower === "2" || lower === "kiswahili" || lower === "swahili") {
+        await supabase.from("users").update({ language: "sw", onboarding_step: null }).eq("id", user.id);
+        const updatedUser = { ...user, language: "sw" };
+        await sendReply(from, t(updatedUser, "language_set_sw"));
+        return res.sendStatus(200);
+      }
+
+      // Auto-detect Swahili before language is chosen
+      if (looksLikeSwahili(text)) {
+        await sendReply(from, t(user, "autodetect_swahili_prompt"));
+        return res.sendStatus(200);
+      }
+
+      // Unrecognised input — re-prompt
+      await sendReply(from, t(user, "language_invalid"));
+      return res.sendStatus(200);
+    }
+
     // ── CANCEL ────────────────────────────────────────────────────────────
-    if (text.toLowerCase() === "cancel") {
-      await supabase.from("users").update({ pending_plate: null, onboarding_step: null, pending_photo: null }).eq("id", user.id);
-      await sendReply(from, `Okay, cancelled. What would you like to do?\n\nType "help" to see all commands.`);
+    if (lower === "cancel" || lower === "ghairi") {
+      await supabase.from("users").update({
+        pending_plate: null,
+        onboarding_step: null,
+        pending_photo: null
+      }).eq("id", user.id);
+      await sendReply(from, t(user, "cancelled"));
       return res.sendStatus(200);
     }
 
@@ -142,9 +175,7 @@ router.post("/", async (req, res) => {
       const amount = parseAmount(text);
 
       if (!amount) {
-        await sendReply(from,
-          `I need the amount to log this.\n\nHow much did you pay? (e.g. 120k)\n\nOr type "cancel" to skip.`
-        );
+        await sendReply(from, t(user, "photo_amount_prompt"));
         return res.sendStatus(200);
       }
 
@@ -162,32 +193,30 @@ router.post("/", async (req, res) => {
         last_log_at: new Date().toISOString()
       }).eq("id", user.id);
 
-      const carUsed = (await getUserCars(user.id)).find(c => c.id === logCarId);
+      const photoUserCars = await getUserCars(user.id);
+      const carUsed = photoUserCars.find(c => c.id === logCarId);
       const carName = carUsed ? carUsed.car_name : "your car";
-      const { subtypeLabel: stLabel } = require("../utils/helpers");
       const typeLabel = logType === "fuel" ? "Fuel"
         : logType === "insurance" ? "Insurance"
-        : (logSubtype ? (stLabel(logSubtype) || "Maintenance") : "Maintenance");
+        : (logSubtype ? (subtypeLabel(logSubtype) || "Maintenance") : "Maintenance");
 
-      await sendReply(from,
-        `✅ Logged from photo!\n\nCar: ${carName}\n${typeLabel}: ${amount.toLocaleString()} TZS\n\n📷 ${pending.description || "Photo attached"}`
-      );
+      await sendReply(from, t(user, "photo_logged", carName, typeLabel, amount, pending.description));
       return res.sendStatus(200);
     }
 
     // ── CANCEL PAYMENT ────────────────────────────────────────────────────
-    if (text.toLowerCase() === "cancel payment") {
+    if (lower === "cancel payment" || lower === "ghairi malipo") {
       const { data: pendingPayment } = await supabase
         .from("payments").select("*")
         .eq("user_id", user.id).eq("status", "pending").single();
 
       if (!pendingPayment) {
-        await sendReply(from, `You don't have any pending payments to cancel.`);
+        await sendReply(from, t(user, "cancel_payment_none"));
         return res.sendStatus(200);
       }
 
       await supabase.from("payments").delete().eq("id", pendingPayment.id);
-      await sendReply(from, `✅ Your pending payment (${pendingPayment.transaction_id}) has been cancelled.\n\nIf you'd like to try again, type: upgrade`);
+      await sendReply(from, t(user, "cancel_payment_success", pendingPayment.transaction_id));
       return res.sendStatus(200);
     }
 
@@ -195,7 +224,6 @@ router.post("/", async (req, res) => {
     if (from === ADMIN_PHONE) {
       const handled = await handleAdminCommand(from, text);
       if (handled) return res.sendStatus(200);
-      // If not handled, fall through to user commands (admin is also a user)
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -218,81 +246,110 @@ router.post("/", async (req, res) => {
     // ── DETECT CAR NAME IN MESSAGE ────────────────────────────────────────
     let detectedCars = [];
     userCars.forEach(car => {
-      if (text.toLowerCase().includes(car.car_name)) detectedCars.push(car);
+      if (lower.includes(car.car_name)) detectedCars.push(car);
     });
 
     if (detectedCars.length > 1) {
       const options = detectedCars.map(car => `• ${car.car_name}`).join("\n");
-      await sendReply(from, `I found a few cars in your message — which one did you mean?\n\n${options}\n\nTip: Include the car name clearly, e.g:\nfuel 40k rav4`);
+      await sendReply(from, `${t(user, "multiple_cars_detected")}\n\n${options}`);
       return res.sendStatus(200);
     }
 
     if (detectedCars.length === 1) carId = detectedCars[0].id;
 
+    // ── LANGUAGE COMMAND ──────────────────────────────────────────────────
+    if (lower === "language" || lower === "lugha") {
+      await supabase.from("users").update({ onboarding_step: "awaiting_language_switch" }).eq("id", user.id);
+      await sendReply(from, t(user, "language_switch_prompt"));
+      return res.sendStatus(200);
+    }
+
+    // ── LANGUAGE SWITCH STEP ──────────────────────────────────────────────
+    if (user.onboarding_step === "awaiting_language_switch") {
+      if (lower === "1" || lower === "english") {
+        await supabase.from("users").update({ language: "en", onboarding_step: null }).eq("id", user.id);
+        const updatedUser = { ...user, language: "en" };
+        await sendReply(from, t(updatedUser, "language_switched_en"));
+        return res.sendStatus(200);
+      }
+
+      if (lower === "2" || lower === "kiswahili" || lower === "swahili") {
+        await supabase.from("users").update({ language: "sw", onboarding_step: null }).eq("id", user.id);
+        const updatedUser = { ...user, language: "sw" };
+        await sendReply(from, t(updatedUser, "language_switched_sw"));
+        return res.sendStatus(200);
+      }
+
+      await sendReply(from, t(user, "language_invalid_switch"));
+      return res.sendStatus(200);
+    }
+
     // ── REMINDERS COMMAND ─────────────────────────────────────────────────
-    if (text.toLowerCase().startsWith("reminders ")) {
-      const option = text.toLowerCase().split(" ")[1]?.trim();
+    // English: reminders weekly / fortnightly / monthly / off
+    // Swahili: vikumbusho wiki / wiki mbili / mwezi / zima
+    const reminderFreqMatch =
+      lower.startsWith("reminders ") ? lower.slice(10).trim() :
+      lower.startsWith("vikumbusho ") ? lower.slice(11).trim() :
+      null;
+
+    if (reminderFreqMatch !== null) {
       const validOptions = {
         "weekly":      "7days",
         "fortnightly": "14days",
         "monthly":     "30days",
-        "off":         "off"
+        "off":         "off",
+        "wiki":        "7days",
+        "wiki mbili":  "14days",
+        "mwezi":       "30days",
+        "zima":        "off"
       };
 
-      if (!validOptions[option]) {
-        await sendReply(from,
-          `To set your reminder frequency, reply with one of:\n\nreminders weekly\nreminders fortnightly\nreminders monthly\nreminders off`
-        );
+      if (!validOptions[reminderFreqMatch]) {
+        await sendReply(from, t(user, "reminder_frequency_invalid"));
         return res.sendStatus(200);
       }
 
-      await supabase.from("users").update({ reminder_frequency: validOptions[option] }).eq("id", user.id);
+      await supabase.from("users").update({ reminder_frequency: validOptions[reminderFreqMatch] }).eq("id", user.id);
 
-      const confirmMsg = option === "off"
-        ? `🔕 Got it — no more logging reminders.\n\nYou can turn them back on anytime:\nreminders weekly`
-        : `✅ Reminders set to ${option}.\n\nI'll nudge you if you haven't logged anything in ${option === "weekly" ? "7 days" : option === "fortnightly" ? "14 days" : "30 days"}.`;
-
-      await sendReply(from, confirmMsg);
+      if (reminderFreqMatch === "off" || reminderFreqMatch === "zima") {
+        await sendReply(from, t(user, "reminder_frequency_off"));
+      } else {
+        const dayLabels = {
+          "weekly":     "7 days",  "fortnightly": "14 days", "monthly":   "30 days",
+          "wiki":       "siku 7",  "wiki mbili":  "siku 14", "mwezi":     "mwezi mmoja"
+        };
+        await sendReply(from, t(user, "reminder_frequency_set", reminderFreqMatch, dayLabels[reminderFreqMatch]));
+      }
       return res.sendStatus(200);
     }
 
     // ── REMIND (SERVICE INTERVAL) ─────────────────────────────────────────
-    // Usage: remind oil change every 5000km
-    //        remind oil change every 90 days
-    if (text.toLowerCase().startsWith("remind ")) {
+    // English: remind oil change every 5000km
+    // Swahili: kumbuka oil change kila 5000km
+    const isRemindCommand = lower.startsWith("remind ") || lower.startsWith("kumbuka ");
+
+    if (isRemindCommand) {
       if (PREMIUM_ENABLED && !isPremium(user)) {
-        await sendReply(from,
-          `⭐ Service reminders are a Premium feature.\n\nUpgrade to set reminders for oil changes, tyre rotations, and more:\nupgrade`
-        );
+        await sendReply(from, t(user, "service_reminder_premium_required"));
         return res.sendStatus(200);
       }
 
       if (!carId) {
-        await sendReply(from, `You need a car registered before setting service reminders.\n\nType: cars`);
+        await sendReply(from, t(user, "service_reminder_no_car"));
         return res.sendStatus(200);
       }
 
-      // Parse: remind <service type> every <number> <km|days>
-      const match = text.match(/^remind (.+?) every (\d+)\s*(km|days?)$/i);
+      const match = text.match(/^(?:remind|kumbuka) (.+?) (?:every|kila) (\d+)\s*(km|days?|siku)$/i);
 
       if (!match) {
-        await sendReply(from,
-`I didn't understand that reminder format.
-
-Examples:
-remind oil change every 5000km
-remind tyre every 10000km
-remind service every 90 days
-
-To see your reminders:
-reminders list`
-        );
+        await sendReply(from, t(user, "service_reminder_invalid_format"));
         return res.sendStatus(200);
       }
 
       const serviceRaw = match[1].trim();
       const intervalNum = parseInt(match[2]);
-      const intervalUnit = match[3].toLowerCase().startsWith("day") ? "days" : "km";
+      const intervalUnitRaw = match[3].toLowerCase();
+      const intervalUnit = (intervalUnitRaw.startsWith("day") || intervalUnitRaw === "siku") ? "days" : "km";
       const serviceKey = normalizeServiceType(serviceRaw);
       const label = serviceTypeLabel(serviceKey);
 
@@ -306,16 +363,12 @@ reminders list`
         notified_at: null
       };
 
-      // Upsert — update if same car + service type already exists
-      const { data: existing } = await supabase
-        .from("service_reminders")
-        .select("id")
-        .eq("car_id", carId)
-        .eq("service_type", serviceKey)
-        .single();
+      const { data: existingReminder } = await supabase
+        .from("service_reminders").select("id")
+        .eq("car_id", carId).eq("service_type", serviceKey).single();
 
-      if (existing) {
-        await supabase.from("service_reminders").update(reminderData).eq("id", existing.id);
+      if (existingReminder) {
+        await supabase.from("service_reminders").update(reminderData).eq("id", existingReminder.id);
       } else {
         await supabase.from("service_reminders").insert(reminderData);
       }
@@ -325,35 +378,32 @@ reminders list`
         ? `every ${intervalNum.toLocaleString()} km`
         : `every ${intervalNum} days`;
 
-      await sendReply(from,
-        `✅ Reminder set — ${label} for ${activeCar?.car_name || "your car"}\n\nI'll remind you ${intervalLabel}.\n\nTo see all reminders:\nreminders list\n\nTo remove it:\nreminders clear ${serviceRaw}`
-      );
+      await sendReply(from, t(user, "service_reminder_set",
+        label, activeCar?.car_name || "your car", intervalLabel, serviceRaw
+      ));
       return res.sendStatus(200);
     }
 
     // ── REMINDERS LIST ────────────────────────────────────────────────────
-    if (text.toLowerCase() === "reminders list") {
+    if (lower === "reminders list" || lower === "orodha ya vikumbusho") {
       if (!carId) {
-        await sendReply(from, `No active car found.\n\nType: cars`);
+        await sendReply(from, t(user, "reminders_list_no_car"));
         return res.sendStatus(200);
       }
 
       const { data: reminders } = await supabase
-        .from("service_reminders")
-        .select("*")
-        .eq("car_id", carId)
-        .order("created_at");
+        .from("service_reminders").select("*")
+        .eq("car_id", carId).order("created_at");
 
       const activeCar = userCars.find(c => c.id === carId);
 
       if (!reminders || reminders.length === 0) {
-        await sendReply(from,
-          `No service reminders set for ${activeCar?.car_name || "your car"}.\n\nTo add one:\nremind oil change every 5000km`
-        );
+        await sendReply(from, t(user, "reminders_list_empty", activeCar?.car_name || "your car"));
         return res.sendStatus(200);
       }
 
-      let msg = `🔔 Service Reminders — ${activeCar?.car_name || "your car"}\n\n`;
+      const isSw = user.language === "sw";
+      let msg = `🔔 ${isSw ? "Vikumbusho vya Huduma" : "Service Reminders"} — ${activeCar?.car_name || "your car"}\n\n`;
 
       for (const r of reminders) {
         const label = serviceTypeLabel(r.service_type);
@@ -362,86 +412,89 @@ reminders list`
           : `every ${r.interval_days} days`;
         const lastDone = r.last_serviced_at
           ? new Date(r.last_serviced_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
-          : "Not recorded";
-        msg += `🔧 ${label}\n   Interval: ${interval}\n   Last done: ${lastDone}\n\n`;
+          : (isSw ? "Haijarekodiwa" : "Not recorded");
+        msg += `🔧 ${label}\n   ${isSw ? "Muda" : "Interval"}: ${interval}\n   ${isSw ? "Mara ya mwisho" : "Last done"}: ${lastDone}\n\n`;
       }
 
-      msg += `To remove a reminder:\nreminders clear oil change`;
+      msg += t(user, "reminders_list_footer");
       await sendReply(from, msg);
       return res.sendStatus(200);
     }
 
     // ── REMINDERS CLEAR ───────────────────────────────────────────────────
-    if (text.toLowerCase().startsWith("reminders clear ")) {
+    // English: reminders clear oil change
+    // Swahili: futa kikumbusho oil change
+    const remindersClearMatch =
+      lower.startsWith("reminders clear ") ? text.slice(16).trim() :
+      lower.startsWith("futa kikumbusho ") ? text.slice(16).trim() :
+      null;
+
+    if (remindersClearMatch !== null) {
       if (!carId) {
-        await sendReply(from, `No active car found.\n\nType: cars`);
+        await sendReply(from, t(user, "reminders_list_no_car"));
         return res.sendStatus(200);
       }
 
-      const serviceRaw = text.slice(16).trim();
-      const serviceKey = normalizeServiceType(serviceRaw);
+      const serviceKey = normalizeServiceType(remindersClearMatch);
       const label = serviceTypeLabel(serviceKey);
 
-      const { data: existing } = await supabase
-        .from("service_reminders")
-        .select("id")
-        .eq("car_id", carId)
-        .eq("service_type", serviceKey)
-        .single();
+      const { data: existingReminder } = await supabase
+        .from("service_reminders").select("id")
+        .eq("car_id", carId).eq("service_type", serviceKey).single();
 
-      if (!existing) {
-        await sendReply(from,
-          `No reminder found for "${label}".\n\nTo see your reminders:\nreminders list`
-        );
+      if (!existingReminder) {
+        await sendReply(from, t(user, "reminders_clear_not_found", label));
         return res.sendStatus(200);
       }
 
-      await supabase.from("service_reminders").delete().eq("id", existing.id);
-      await sendReply(from, `✅ Reminder removed — ${label}.\n\nTo see remaining reminders:\nreminders list`);
+      await supabase.from("service_reminders").delete().eq("id", existingReminder.id);
+      await sendReply(from, t(user, "reminders_clear_success", label));
       return res.sendStatus(200);
     }
-    if (text.toLowerCase().startsWith("my city ")) {
-      const newCity = text.slice(8).trim();
+
+    // ── MY CITY / JIJI LANGU ──────────────────────────────────────────────
+    const isCityCommand = lower.startsWith("my city ") || lower.startsWith("jiji langu ");
+
+    if (isCityCommand) {
+      const newCity = lower.startsWith("my city ")
+        ? text.slice(8).trim()
+        : text.slice(11).trim();
 
       if (!newCity) {
-        await sendReply(from, `Please include your city name.\n\nExample:\nmy city Arusha`);
+        await sendReply(from, t(user, "city_missing"));
         return res.sendStatus(200);
       }
 
       if (user.city && PREMIUM_ENABLED && !isPremium(user)) {
-        await sendReply(from,
-          `⭐ Changing your city is a Premium feature.\n\nYour current city: ${user.city}\n\nUpgrade to update it: upgrade`
-        );
+        await sendReply(from, t(user, "city_premium_required", user.city));
         return res.sendStatus(200);
       }
 
       await supabase.from("users").update({ city: newCity }).eq("id", user.id);
-      await sendReply(from, `✅ City updated to ${newCity}.\n\nI'll now show you local fuel prices and city-specific updates.`);
+      await sendReply(from, t(user, "city_updated", newCity));
       return res.sendStatus(200);
     }
 
     // ── ONBOARDING: CITY STEP ─────────────────────────────────────────────
     if (user.onboarding_step === "awaiting_city") {
-      const lower = text.toLowerCase().trim();
+      const skipWords = ["skip", "ruka"];
 
-      if (lower === "skip") {
+      if (skipWords.includes(lower)) {
         await supabase.from("users").update({ onboarding_step: "awaiting_fuel_type" }).eq("id", user.id);
-        await sendReply(from,
-          `No problem!\n\nOne more quick question:\n\n⛽ What fuel does your car use?\n\nReply: petrol or diesel\n\n(or "skip" to skip)`
-        );
+        await sendReply(from, t(user, "onboarding_city_skipped"));
         return res.sendStatus(200);
       }
 
-      await supabase.from("users").update({ city: text.trim(), onboarding_step: "awaiting_fuel_type" }).eq("id", user.id);
-      await sendReply(from,
-        `✅ Got it — ${text.trim()}!\n\nOne more quick question:\n\n⛽ What fuel does your car use?\n\nReply: petrol or diesel\n\n(or "skip" to skip)`
-      );
+      await supabase.from("users").update({
+        city: text.trim(),
+        onboarding_step: "awaiting_fuel_type"
+      }).eq("id", user.id);
+      await sendReply(from, t(user, "onboarding_city_saved", text.trim()));
       return res.sendStatus(200);
     }
 
     // ── ONBOARDING: FUEL TYPE STEP ────────────────────────────────────────
     if (user.onboarding_step === "awaiting_fuel_type") {
-      const lower = text.toLowerCase().trim();
       const fuelType = (lower === "petrol" || lower === "diesel") ? lower : null;
 
       await supabase.from("users").update({ onboarding_step: null }).eq("id", user.id);
@@ -450,136 +503,99 @@ reminders list`
         await supabase.from("cars").update({ fuel_type: fuelType }).eq("id", carId);
       }
 
-      const fuelMsg = fuelType ? `Fuel type saved: ${fuelType}.` : `No problem, you can always update this later.`;
+      const fuelMsg = fuelType
+        ? t(user, "fuel_type_saved", fuelType)
+        : t(user, "fuel_type_skipped");
 
-      await sendReply(from,
-        `✅ ${fuelMsg}\n\nYou're all set! Here's how to get started:\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history\n\nType "help" anytime.`
-      );
+      await sendReply(from, t(user, "onboarding_complete", fuelMsg));
       return res.sendStatus(200);
     }
 
     // ── START ─────────────────────────────────────────────────────────────
-    if (text.toLowerCase() === "start") {
-      await sendReply(from,
-        `🚗 Car Logbook\n\nHey ${user.name}! Here's what you can do:\n\n⛽ Log fuel → fuel 40k\n🔧 Log maintenance → oil change 120k\n📏 Log mileage → mileage 30402\n📒 View history → history\n🚗 View your cars → cars\n➕ Add a new car → add car\n\nType "help" anytime you need a reminder.\n💬 Have feedback? feedback <your message>`
-      );
+    if (lower === "start") {
+      await sendReply(from, t(user, "start", user.name));
       return res.sendStatus(200);
     }
 
     // ── GREETINGS ─────────────────────────────────────────────────────────
-    const greetings = ["hi", "hello", "hey", "mambo"];
+    const greetings = ["hi", "hello", "hey", "mambo", "habari", "karibu", "sasa"];
 
-    if (greetings.includes(text.toLowerCase())) {
-      const hasCars = userCars.length > 0;
-      if (!hasCars) {
-        await sendReply(from,
-          `👋 Hey ${user.name}! Good to have you here.\n\nIt looks like you haven't added a car yet. Let's fix that!\n\nWhat's your car's plate number?\n\nExample: T123ABC`
-        );
-      } else {
-        await sendReply(from,
-          `👋 Hey ${user.name}! Ready to log something?\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history\n\nType "help" to see all commands.`
-        );
-      }
-      return res.sendStatus(200);
-    }
-
-    // ── HELP ──────────────────────────────────────────────────────────────
-    if (text.toLowerCase() === "help") {
-      await sendReply(from,
-`🚗 Car Logbook — Quick Guide
-
-Logging:
-⛽ fuel 40k
-🔧 oil change 120k
-🔧 air cleaner 30k
-🔧 battery 80k
-🔧 tyre 150k
-📏 mileage 30402
-💰 insurance 1.2M
-
-History:
-📒 history
-📒 history 10 ${PREMIUM_ENABLED ? "(Premium)" : ""}
-📒 history month ${PREMIUM_ENABLED ? "(Premium)" : ""}
-📒 history rav4 ${PREMIUM_ENABLED ? "(Premium)" : ""}
-
-Cars:
-🚗 cars → your registered cars
-➕ add car → register a new car ${PREMIUM_ENABLED ? "(Premium after 1st car)" : ""}
-🔄 switch to rav4 → change active car
-
-Settings:
-📍 my city Arusha → local fuel prices ${PREMIUM_ENABLED ? "(free to set, Premium to change)" : ""}
-🔔 reminders weekly / monthly / off → logging reminders
-🔧 remind oil change every 5000km → service reminders ${PREMIUM_ENABLED ? "(Premium)" : ""}
-
-Other:
-↩️ undo → remove last log
-⭐ upgrade → go Premium
-💬 feedback <message> → send us feedback
-
-Tip: Just type what you did naturally — I'll figure out the rest!`
+    if (greetings.includes(lower)) {
+      await sendReply(from, userCars.length > 0
+        ? t(user, "greeting_with_car", user.name)
+        : t(user, "greeting_no_car", user.name)
       );
       return res.sendStatus(200);
     }
 
+    // ── HELP ──────────────────────────────────────────────────────────────
+    if (lower === "help" || lower === "msaada") {
+      await sendReply(from, t(user, "help", PREMIUM_ENABLED));
+      return res.sendStatus(200);
+    }
+
     // ── FEEDBACK ──────────────────────────────────────────────────────────
-    if (text.toLowerCase().startsWith("feedback ")) {
-      const feedbackMessage = text.slice(9).trim();
+    // English: feedback <message>
+    // Swahili: maoni <message>
+    const isFeedback = lower.startsWith("feedback ") || lower.startsWith("maoni ");
+
+    if (isFeedback) {
+      const feedbackMessage = lower.startsWith("feedback ")
+        ? text.slice(9).trim()
+        : text.slice(6).trim();
 
       if (!feedbackMessage) {
-        await sendReply(from, `Please include your message after "feedback".\n\nExample:\nfeedback the bot didn't understand my message`);
+        await sendReply(from, t(user, "feedback_missing"));
         return res.sendStatus(200);
       }
 
       await supabase.from("feedback").insert({ user_id: user.id, message: feedbackMessage });
       await sendReply(ADMIN_PHONE,
-        `💬 User Feedback\n\nUser: ${user.name}\nPhone: ${from}\n\nMessage:\n${feedbackMessage}`
+        `💬 User Feedback\n\nUser: ${user.name}\nPhone: ${from}\nLanguage: ${user.language || "en"}\n\nMessage:\n${feedbackMessage}`
       );
-      await sendReply(from, `Thanks for the feedback, ${user.name}! 🙏\n\nWe read every message and use it to make Car Logbook better.`);
+      await sendReply(from, t(user, "feedback_thanks", user.name));
       return res.sendStatus(200);
     }
 
     // ── UPGRADE ───────────────────────────────────────────────────────────
-    if (text.toLowerCase() === "upgrade") {
+    if (lower === "upgrade") {
       if (isActivePremiumUser(user)) {
         const expiryDate = user.premium_until
           ? new Date(user.premium_until).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
           : null;
         const planLabel = user.premium_plan === "annual" ? "Annual" : "Monthly";
-
-        await sendReply(from,
-          `⭐ You're already a Premium user!\n\nYour Premium features are active:\n• Multiple cars\n• Full history access\n• More coming soon\n${expiryDate ? `\nPlan: ${planLabel}\nRenews on: ${expiryDate}` : ""}\nThank you for supporting Car Logbook! 🙏`
-        );
+        await sendReply(from, t(user, "already_premium", planLabel, expiryDate));
       } else {
+        // Upgrade message is bilingual — pricing must be crystal clear regardless of language
         await sendReply(from,
 `⭐ Car Logbook Premium
 
 Monthly: 5,000 TZS/month
 Annual: 50,000 TZS/year (save 10,000 TZS)
 
-What you get:
-✅ Multiple cars
-✅ Full history (last 10, monthly, per car)
-✅ Insurance expiry reminders
-✅ Monthly expense summary
-✅ City-specific fuel prices
-✅ More features coming soon
+What you get / Utakachopata:
+✅ Multiple cars / Magari mengi
+✅ Full history / Historia kamili
+✅ Insurance expiry reminders / Vikumbusho vya bima
+✅ Monthly expense summary / Muhtasari wa gharama
+✅ City-specific fuel prices / Bei za mafuta za jiji lako
+✅ More features coming soon / Vipengele zaidi vinakuja
 
 ─────────────────
-How to upgrade:
+How to upgrade / Jinsi ya kupanda daraja:
 
-1. Send payment via M-Pesa:
+1. Send payment via M-Pesa / Tuma malipo kupitia M-Pesa:
 
-   Number: ${MPESA_NUMBER}
-   Name: Car Logbook
+   Number / Nambari: ${MPESA_NUMBER}
+   Name / Jina: Car Logbook
 
-2. After paying, send:
+2. After paying, send / Baada ya kulipa, tuma:
    paid <transaction_id>
 
    Or paste your full SMS and I'll find the ID.
+   Au bandika SMS yako yote nami nitapata nambari.
 
-   Example:
+   Example / Mfano:
    paid QHG72K3
 ─────────────────
 
@@ -590,8 +606,15 @@ Questions? contact@carlogbook.app`
     }
 
     // ── PAID ──────────────────────────────────────────────────────────────
-    if (text.toLowerCase().startsWith("paid ")) {
-      const rawText = text.slice(5).trim();
+    // English: paid <txn>
+    // Swahili: limelipwa <txn>
+    const isPaidCommand = lower.startsWith("paid ") || lower.startsWith("limelipwa ");
+
+    if (isPaidCommand) {
+      const rawText = lower.startsWith("paid ")
+        ? text.slice(5).trim()
+        : text.slice(10).trim();
+
       let txnId = null;
       const words = rawText.split(" ");
 
@@ -602,15 +625,13 @@ Questions? contact@carlogbook.app`
         if (extracted) {
           txnId = extracted.toUpperCase();
         } else {
-          await sendReply(from,
-            `I couldn't find a transaction ID in that message.\n\nPlease send just the transaction ID:\n\npaid QHG72K3\n\nOr contact us at contact@carlogbook.app if you need help.`
-          );
+          await sendReply(from, t(user, "paid_txn_not_found"));
           return res.sendStatus(200);
         }
       }
 
       if (!txnId) {
-        await sendReply(from, `Please include your transaction ID.\n\nExample:\npaid QHG72K3`);
+        await sendReply(from, t(user, "paid_no_txn"));
         return res.sendStatus(200);
       }
 
@@ -618,16 +639,15 @@ Questions? contact@carlogbook.app`
         .from("payments").select("*").eq("user_id", user.id).eq("status", "pending").single();
 
       if (existingPending) {
-        await sendReply(from,
-          `You already have a pending payment (${existingPending.transaction_id}).\n\nWe'll notify you once it's verified. This usually takes a few hours.\n\nMade a mistake? Type: cancel payment\n\nQuestions? contact@carlogbook.app`
-        );
+        await sendReply(from, t(user, "paid_already_pending", existingPending.transaction_id));
         return res.sendStatus(200);
       }
 
-      const { data: duplicateTxn } = await supabase.from("payments").select("*").eq("transaction_id", txnId).single();
+      const { data: duplicateTxn } = await supabase
+        .from("payments").select("*").eq("transaction_id", txnId).single();
 
       if (duplicateTxn) {
-        await sendReply(from, `⚠️ That transaction ID has already been submitted.\n\nIf you think this is a mistake, contact us at:\ncontact@carlogbook.app`);
+        await sendReply(from, t(user, "paid_duplicate"));
         await sendReply(ADMIN_PHONE,
           `⚠️ Duplicate Transaction ID Alert\n\nUser: ${user.name}\nPhone: ${from}\nTransaction ID: ${txnId}\n\nThis ID was already used. Do NOT approve without verifying.`
         );
@@ -635,23 +655,22 @@ Questions? contact@carlogbook.app`
       }
 
       await supabase.from("payments").insert({ user_id: user.id, transaction_id: txnId, status: "pending" });
-      await sendReply(from,
-        `✅ Got it! Your payment is being verified.\n\nTransaction ID: ${txnId}\n\nYou'll receive a confirmation message shortly.\n\nMade a mistake? Type: cancel payment\n\nQuestions? contact@carlogbook.app`
-      );
+      await sendReply(from, t(user, "paid_received", txnId));
       await sendReply(ADMIN_PHONE,
-        `💰 Premium Payment Request\n\nUser: ${user.name}\nPhone: ${from}\nTransaction ID: ${txnId}\n\nTo approve:\napprove ${from}\n\nTo reject:\nreject ${from}`
+        `💰 Premium Payment Request\n\nUser: ${user.name}\nPhone: ${from}\nLanguage: ${user.language || "en"}\nTransaction ID: ${txnId}\n\nTo approve:\napprove ${from}\n\nTo reject:\nreject ${from}`
       );
       return res.sendStatus(200);
     }
 
     // ── CARS ──────────────────────────────────────────────────────────────
-    if (text.toLowerCase() === "cars") {
+    if (lower === "cars" || lower === "magari") {
       const cars = await getUserCars(user.id);
+      const isSw = user.language === "sw";
 
       if (!cars.length) {
-        await sendReply(from, `🚗 You haven't added any cars yet.\n\nSend your plate number to get started.\n\nExample: T123ABC`);
+        await sendReply(from, t(user, "no_cars"));
       } else {
-        let messageText = "🚗 Your Cars\n\n";
+        let messageText = `🚗 ${isSw ? "Magari Yako" : "Your Cars"}\n\n`;
 
         for (const car of cars) {
           const isActive = car.id === carId;
@@ -663,75 +682,73 @@ Questions? contact@carlogbook.app`
           const { count: totalLogs } = await supabase.from("logs")
             .select("*", { count: "exact", head: true }).eq("car_id", car.id);
 
-          messageText += `${isActive ? "▶" : "•"} ${car.car_name} — ${car.plate_number}${isActive ? " (active)" : ""}\n`;
+          messageText += `${isActive ? "▶" : "•"} ${car.car_name} — ${car.plate_number}${isActive ? (isSw ? " (hai)" : " (active)") : ""}\n`;
           if (lastMileage) messageText += `   📏 ${lastMileage.mileage?.toLocaleString()} km\n`;
           if (lastFuel) {
             const fuelDate = new Date(lastFuel.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
             messageText += `   ⛽ ${lastFuel.amount?.toLocaleString()} TZS (${fuelDate})\n`;
           }
-          if (totalLogs > 0) messageText += `   📋 ${totalLogs} log${totalLogs === 1 ? "" : "s"} total\n`;
+          if (totalLogs > 0) messageText += `   📋 ${totalLogs} ${isSw ? "ingizo" : `log${totalLogs === 1 ? "" : "s"} total`}\n`;
           messageText += "\n";
         }
 
-        messageText += `To log against a specific car:\nfuel 40k rav4\n\nTo switch active car:\nswitch to rav4\n\n➕ Add another car: add car`;
+        messageText += t(user, "cars_footer", userCars[0]?.car_name || "rav4");
         await sendReply(from, messageText);
       }
       return res.sendStatus(200);
     }
 
     // ── ADD CAR ───────────────────────────────────────────────────────────
-    if (text.toLowerCase() === "add car") {
+    if (lower === "add car" || lower === "ongeza gari") {
       if (PREMIUM_ENABLED && userCars.length >= 1 && !isPremium(user)) {
-        await sendReply(from,
-          `⭐ Adding multiple cars is a Premium feature.\n\nYou're currently on the free plan which includes 1 car.\n\nUpgrade for 5,000 TZS/month to add unlimited cars.\n\nType: upgrade`
-        );
+        await sendReply(from, t(user, "add_car_premium_required"));
         return res.sendStatus(200);
       }
 
       await supabase.from("users").update({ pending_plate: "AWAITING" }).eq("id", user.id);
-      await sendReply(from, `➕ Let's add a new car.\n\nWhat's the plate number?\n\nExample: T456DEF`);
+      await sendReply(from, t(user, "add_car_prompt"));
       return res.sendStatus(200);
     }
 
     // ── SWITCH ACTIVE CAR ─────────────────────────────────────────────────
-    const switchPhrases = ["switch to ", "use ", "change to "];
-    const switchMatch = switchPhrases.find(p => text.toLowerCase().startsWith(p));
+    // English: switch to rav4 / use rav4 / change to rav4
+    // Swahili: badili rav4
+    const switchPhrases = ["switch to ", "use ", "change to ", "badili "];
+    const switchMatch = switchPhrases.find(p => lower.startsWith(p));
 
     if (switchMatch) {
       if (PREMIUM_ENABLED && !isPremium(user)) {
-        await sendReply(from, `⭐ Switching between cars is a Premium feature.\n\nType: upgrade`);
+        await sendReply(from, t(user, "switch_premium_required"));
         return res.sendStatus(200);
       }
 
-      const carName = text.toLowerCase().replace(switchMatch, "").trim();
+      const carName = lower.replace(switchMatch, "").trim();
       const matchedCar = userCars.find(car => car.car_name === carName);
 
       if (!matchedCar) {
-        let notFoundReply = `I couldn't find a car named "${carName}".\n\nYour cars:\n`;
+        let notFoundReply = `${t(user, "switch_car_not_found", carName)}\n`;
         userCars.forEach(car => { notFoundReply += `• ${car.car_name}\n`; });
-        notFoundReply += `\nExample:\nswitch to rav4`;
+        notFoundReply += `\n${user.language === "sw" ? "Mfano:\nbadili rav4" : "Example:\nswitch to rav4"}`;
         await sendReply(from, notFoundReply);
         return res.sendStatus(200);
       }
 
       await setActiveCar(user.id, matchedCar.id);
-      await sendReply(from,
-        `✅ Active car switched to ${matchedCar.car_name}.\n\nLogs will now go to ${matchedCar.car_name} by default.\n\nTo log:\nfuel 40k\nmileage 30402`
-      );
+      await sendReply(from, t(user, "switch_car_success", matchedCar.car_name));
       return res.sendStatus(200);
     }
 
     // ── UNDO ──────────────────────────────────────────────────────────────
-    if (text.toLowerCase() === "undo") {
+    if (lower === "undo" || lower === "futa") {
       if (!carId) {
-        await sendReply(from, `Hmm, I couldn't find a car to undo a log for.\n\nMake sure you have a car registered:\ncars`);
+        await sendReply(from, t(user, "undo_no_car"));
         return res.sendStatus(200);
       }
 
       if (PREMIUM_ENABLED && !isPremium(user)) {
         const allowed = await checkLimit(user.id, "undo_count");
         if (!allowed) {
-          await sendReply(from, `You've used your 3 undos for today — the limit resets tomorrow.\n\nUpgrade for unlimited undos:\nupgrade`);
+          await sendReply(from, t(user, "undo_limit_reached"));
           return res.sendStatus(200);
         }
         await incrementUsage(user.id, "undo_count");
@@ -739,30 +756,35 @@ Questions? contact@carlogbook.app`
 
       const deleted = await deleteLastLog(carId);
       await sendReply(from, deleted
-        ? `↩️ Done! Your last log has been removed.`
-        : `Nothing to undo — there are no logs yet for this car.`
+        ? t(user, "undo_success")
+        : t(user, "undo_nothing")
       );
       return res.sendStatus(200);
     }
 
     // ── HISTORY ───────────────────────────────────────────────────────────
-    if (text.toLowerCase().startsWith("history")) {
-      const parts = text.toLowerCase().split(" ");
+    // English: history / history 10 / history month / history rav4
+    // Swahili: historia / historia 10 / historia mwezi / historia rav4
+    const isHistoryCommand = lower.startsWith("history") || lower.startsWith("historia");
+
+    if (isHistoryCommand) {
+      const parts = lower.split(" ");
       let historyCarName = null;
       let command = null;
 
-      if (parts.length > 1 && parts[1] !== "10" && parts[1] !== "month") {
+      if (parts.length > 1 && parts[1] !== "10" && parts[1] !== "month" && parts[1] !== "mwezi") {
         historyCarName = parts[1];
         command = parts[2];
       } else {
         command = parts[1];
       }
 
+      // Normalise Swahili month command
+      if (command === "mwezi") command = "month";
+
       if (PREMIUM_ENABLED && !isPremium(user)) {
         if (command === "10" || command === "month" || historyCarName) {
-          await sendReply(from,
-            `⭐ This is a Premium feature.\n\nExtended history and per-car history are available on Premium.\n\nType: upgrade`
-          );
+          await sendReply(from, t(user, "history_premium_required"));
           return res.sendStatus(200);
         }
       }
@@ -770,9 +792,7 @@ Questions? contact@carlogbook.app`
       if (PREMIUM_ENABLED && !isPremium(user)) {
         const allowed = await checkLimit(user.id, "history_count");
         if (!allowed) {
-          await sendReply(from,
-            `You've checked your history 3 times today — the limit resets tomorrow.\n\nUpgrade for unlimited history access:\nupgrade`
-          );
+          await sendReply(from, t(user, "history_limit_reached"));
           return res.sendStatus(200);
         }
         await incrementUsage(user.id, "history_count");
@@ -781,9 +801,9 @@ Questions? contact@carlogbook.app`
       if (historyCarName) {
         const matchedCar = userCars.find(car => car.car_name === historyCarName);
         if (!matchedCar) {
-          let notFoundReply = `I couldn't find a car named "${historyCarName}".\n\nYour cars:\n`;
+          let notFoundReply = `${t(user, "history_car_not_found", historyCarName)}\n`;
           userCars.forEach(car => { notFoundReply += `• ${car.car_name}\n`; });
-          notFoundReply += `\nTry: history ${userCars[0]?.car_name || "rav4"}`;
+          notFoundReply += `\n${user.language === "sw" ? "Jaribu: historia" : "Try: history"} ${userCars[0]?.car_name || "rav4"}`;
           await sendReply(from, notFoundReply);
           return res.sendStatus(200);
         }
@@ -802,19 +822,20 @@ Questions? contact@carlogbook.app`
 
       const activeCar = userCars.find(car => car.id === carId);
       const activeCarName = activeCar ? activeCar.car_name : "your car";
+      const isSw = user.language === "sw";
 
       if (!logs.length) {
-        await sendReply(from, `📒 No logs found for ${activeCarName}${command === "month" ? " this month" : ""}.\n\nStart logging:\nfuel 40k`);
+        await sendReply(from, t(user, "history_no_logs", activeCarName, command === "month"));
       } else {
-        let messageText = `📒 ${activeCarName} — Recent Logs\n\n`;
+        let messageText = `📒 ${activeCarName} — ${isSw ? "Maingizo ya Hivi Karibuni" : "Recent Logs"}\n\n`;
 
         logs.forEach(log => {
           const formattedDate = new Date(log.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
           let line = "";
-          if (log.type === "fuel") line = `⛽ Fuel — ${log.amount?.toLocaleString()} TZS`;
-          else if (log.type === "maintenance") {
+          if (log.type === "fuel") {
+            line = `⛽ ${isSw ? "Mafuta" : "Fuel"} — ${log.amount?.toLocaleString()} TZS`;
+          } else if (log.type === "maintenance") {
             const label = log.subtype ? subtypeLabel(log.subtype) : null;
-            // Show product description if it came from a photo (description is richer than just the subtype label)
             const isPhotoDescription = log.description &&
               log.description !== log.subtype &&
               log.description !== label &&
@@ -822,27 +843,33 @@ Questions? contact@carlogbook.app`
               !log.description.toLowerCase().startsWith("fuel") &&
               log.description.length > 5;
             const detail = isPhotoDescription ? ` (${log.description})` : "";
-            line = `🔧 ${label || "Maintenance"}${detail} — ${log.amount?.toLocaleString()} TZS`;
-          } else if (log.type === "mileage") line = `📏 Mileage — ${log.mileage?.toLocaleString()} km`;
-          else if (log.type === "insurance") line = `💰 Insurance — ${log.amount?.toLocaleString()} TZS`;
-          else line = `💸 ${log.description}`;
-
+            line = `🔧 ${label || (isSw ? "Matengenezo" : "Maintenance")}${detail} — ${log.amount?.toLocaleString()} TZS`;
+          } else if (log.type === "mileage") {
+            line = `📏 ${isSw ? "Kilomita" : "Mileage"} — ${log.mileage?.toLocaleString()} km`;
+          } else if (log.type === "insurance") {
+            line = `💰 ${isSw ? "Bima" : "Insurance"} — ${log.amount?.toLocaleString()} TZS`;
+          } else {
+            line = `💸 ${log.description}`;
+          }
           messageText += `${formattedDate}\n${line}\n\n`;
         });
 
-        messageText += `See more:\n`;
+        messageText += `${isSw ? "Ona zaidi" : "See more"}:\n`;
+
         if (historyCarName) {
-          messageText += `history ${historyCarName} 10 → last 10 logs\n`;
-          messageText += `history ${historyCarName} month → this month\n`;
+          messageText += `${isSw ? "historia" : "history"} ${historyCarName} 10\n`;
+          messageText += `${isSw ? "historia" : "history"} ${historyCarName} ${isSw ? "mwezi" : "month"}\n`;
         } else {
-          if (command !== "10")    messageText += `history 10 → last 10 logs\n`;
-          if (command !== "month") messageText += `history month → this month\n`;
+          if (command !== "10")    messageText += `${isSw ? "historia" : "history"} 10\n`;
+          if (command !== "month") messageText += `${isSw ? "historia mwezi" : "history month"}\n`;
         }
 
         const otherCars = userCars.filter(car => car.id !== carId);
         if (otherCars.length > 0) {
-          messageText += `\nOther cars:\n`;
-          otherCars.forEach(car => { messageText += `history ${car.car_name} → ${car.car_name} logs\n`; });
+          messageText += `\n${isSw ? "Magari mengine" : "Other cars"}:\n`;
+          otherCars.forEach(car => {
+            messageText += `${isSw ? "historia" : "history"} ${car.car_name}\n`;
+          });
         }
 
         await sendReply(from, messageText);
@@ -851,24 +878,34 @@ Questions? contact@carlogbook.app`
     }
 
     // ── INSURANCE EXPIRY ──────────────────────────────────────────────────
-    if (text.toLowerCase().startsWith("insurance expiry ")) {
+    // English: insurance expiry 15 Aug 2026
+    // Swahili: bima kumalizika 15 Aug 2026
+    const isInsuranceExpiry =
+      lower.startsWith("insurance expiry ") ||
+      lower.startsWith("bima kumalizika ");
+
+    if (isInsuranceExpiry) {
       if (!carId) {
-        await sendReply(from, `You need to have a car registered to set an insurance expiry date.\n\nType: cars`);
+        await sendReply(from, t(user, "insurance_expiry_no_car"));
         return res.sendStatus(200);
       }
 
-      const datePart = text.slice(17).trim();
+      const datePart = lower.startsWith("insurance expiry ")
+        ? text.slice(17).trim()
+        : text.slice(16).trim();
+
       const parsed = new Date(datePart);
 
       if (isNaN(parsed.getTime())) {
-        await sendReply(from, `I couldn't read that date. Please use a clear format.\n\nExamples:\ninsurance expiry 15 Aug 2026\ninsurance expiry 2026-08-15`);
+        await sendReply(from, t(user, "insurance_expiry_invalid_date"));
         return res.sendStatus(200);
       }
 
       const expiryDate = parsed.toISOString().split("T")[0];
-      const { data: existing } = await supabase.from("car_insurance").select("id").eq("car_id", carId).single();
+      const { data: existingInsurance } = await supabase
+        .from("car_insurance").select("id").eq("car_id", carId).single();
 
-      if (existing) {
+      if (existingInsurance) {
         await supabase.from("car_insurance").update({
           expiry_date: expiryDate, notified_30d: false, notified_7d: false, notified_1d: false
         }).eq("car_id", carId);
@@ -880,11 +917,9 @@ Questions? contact@carlogbook.app`
       const carName = activeCar ? activeCar.car_name : "your car";
       const displayDate = parsed.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
-      await sendReply(from,
-        `✅ Insurance expiry saved for ${carName}.\n\nExpiry date: ${displayDate}${PREMIUM_ENABLED && !isPremium(user)
-          ? "\n\nReminders at 30, 7, and 1 day before expiry are a Premium feature.\n\nType: upgrade"
-          : "\n\nI'll remind you 30 days, 7 days, and 1 day before it expires."}`
-      );
+      await sendReply(from, t(user, "insurance_expiry_saved",
+        carName, displayDate, PREMIUM_ENABLED && isPremium(user)
+      ));
       return res.sendStatus(200);
     }
 
@@ -892,7 +927,7 @@ Questions? contact@carlogbook.app`
     if (isPlateNumber(text)) {
       const plate = text.trim().replace(/\s+/g, "").toUpperCase();
       await supabase.from("users").update({ pending_plate: plate }).eq("id", user.id);
-      await sendReply(from, `Got it — ${plate} ✅\n\nWhat would you like to call this car?\n\nExamples:\nRav4\nDad's car\nWork car`);
+      await sendReply(from, t(user, "plate_received", plate));
       return res.sendStatus(200);
     }
 
@@ -904,7 +939,7 @@ Questions? contact@carlogbook.app`
         if (PREMIUM_ENABLED && !isPremium(user)) {
           const allowed = await checkLimit(user.id, "log_count");
           if (!allowed) {
-            await sendReply(from, `You've reached today's free limit of 10 logs — the limit resets tomorrow.\n\nUpgrade for unlimited logging:\nupgrade`);
+            await sendReply(from, t(user, "log_limit_reached"));
             return res.sendStatus(200);
           }
           await incrementUsage(user.id, "log_count");
@@ -917,11 +952,8 @@ Questions? contact@carlogbook.app`
         await saveLog(carId, "mileage", null, `Mileage ${mileage}`, mileage);
         await supabase.from("users").update({ last_log_at: new Date().toISOString() }).eq("id", user.id);
 
-        reply = `📏 Mileage logged — ${mileage.toLocaleString()} km`;
-
-        if (mileageCount === 0) {
-          reply += `\n\n📌 Tip: Keep logging mileage regularly and I'll track your total km driven each month in your monthly summary.`;
-        }
+        reply = t(user, "mileage_logged", mileage);
+        if (mileageCount === 0) reply += t(user, "mileage_first_tip");
       }
 
       await sendReply(from, reply);
@@ -939,16 +971,15 @@ Questions? contact@carlogbook.app`
       const nameExists = existingName?.some(row => row.cars.car_name === carName);
 
       if (nameExists) {
-        await sendReply(from,
-          `You already have a car named "${carName}".\n\nPlease choose a different name.\n\nExamples:\n${carName} 2\nwork ${carName}`
-        );
+        await sendReply(from, t(user, "car_name_exists", carName));
         return res.sendStatus(200);
       }
 
-      const { data: existingPlate } = await supabase.from("cars").select("plate_number").eq("plate_number", plate).single();
+      const { data: existingPlate } = await supabase
+        .from("cars").select("plate_number").eq("plate_number", plate).single();
 
       if (existingPlate) {
-        await sendReply(from, `⚠️ That plate number is already registered in the system.\n\nIf this is your car, contact us at contact@carlogbook.app to claim ownership.`);
+        await sendReply(from, t(user, "plate_already_registered"));
         await supabase.from("users").update({ pending_plate: null }).eq("id", user.id);
         return res.sendStatus(200);
       }
@@ -961,21 +992,9 @@ Questions? contact@carlogbook.app`
 
       if (isFirstCar) {
         await supabase.from("users").update({ onboarding_step: "awaiting_city" }).eq("id", user.id);
-        await sendReply(from,
-`🎉 ${carName} (${plate}) added!
-
-Quick setup — which city are you in?
-
-This helps me show you local fuel prices each month.
-
-Reply with your city (e.g. Arusha, Dar es Salaam, Mwanza)
-
-Or type "skip" to skip.`
-        );
+        await sendReply(from, t(user, "onboarding_city", carName, plate));
       } else {
-        await sendReply(from,
-          `✅ ${carName} (${plate}) has been added to your logbook.\n\nTo switch to this car:\nswitch to ${carName}`
-        );
+        await sendReply(from, t(user, "car_added_extra", carName, plate));
       }
       return res.sendStatus(200);
     }
@@ -983,15 +1002,13 @@ Or type "skip" to skip.`
     // ── AWAITING PLATE ────────────────────────────────────────────────────
     if (user.pending_plate === "AWAITING") {
       if (!isPlateNumber(text)) {
-        await sendReply(from,
-          `That doesn't look like a valid plate number.\n\nTanzanian plates look like: T123ABC\n\nPlease try again or type "cancel" to go back.`
-        );
+        await sendReply(from, t(user, "invalid_plate"));
         return res.sendStatus(200);
       }
 
       const plate = text.trim().replace(/\s+/g, "").toUpperCase();
       await supabase.from("users").update({ pending_plate: plate }).eq("id", user.id);
-      await sendReply(from, `Got it — ${plate} ✅\n\nWhat would you like to call this car?\n\nExamples:\nPremio\nWork car\nDad's car`);
+      await sendReply(from, t(user, "plate_received", plate));
       return res.sendStatus(200);
     }
 
@@ -1003,13 +1020,14 @@ Or type "skip" to skip.`
       if (PREMIUM_ENABLED && !isPremium(user)) {
         const allowed = await checkLimit(user.id, "log_count");
         if (!allowed) {
-          await sendReply(from, `You've reached today's free limit of 10 logs — the limit resets tomorrow.\n\nUpgrade for unlimited logging:\nupgrade`);
+          await sendReply(from, t(user, "log_limit_reached"));
           return res.sendStatus(200);
         }
         await incrementUsage(user.id, "log_count");
       }
 
-      const { count } = await supabase.from("logs").select("*", { count: "exact", head: true }).eq("car_id", carId);
+      const { count } = await supabase.from("logs")
+        .select("*", { count: "exact", head: true }).eq("car_id", carId);
 
       await saveLog(carId, type, amount, text, null, subtype);
       await supabase.from("users").update({ last_log_at: new Date().toISOString() }).eq("id", user.id);
@@ -1017,36 +1035,36 @@ Or type "skip" to skip.`
       const isFirstLog = count === 0;
 
       if (isFirstLog) {
-        reply = `🎉 First log saved — you're off to a great start!\n\nKeep going:\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history`;
+        reply = t(user, "first_log");
       } else {
         const carUsed = userCars.find(car => car.id === carId);
         const carName = carUsed ? carUsed.car_name : "your car";
+        const isSw = user.language === "sw";
 
         let typeLabel = "Expense";
-        if (type === "fuel") typeLabel = "Fuel";
-        else if (type === "insurance") typeLabel = "Insurance";
-        else if (type === "maintenance") {
-          typeLabel = subtype ? (subtypeLabel(subtype) || "Maintenance") : "Maintenance";
+        if (type === "fuel") {
+          typeLabel = isSw ? "Mafuta" : "Fuel";
+        } else if (type === "insurance") {
+          typeLabel = isSw ? "Bima" : "Insurance";
+        } else if (type === "maintenance") {
+          typeLabel = subtype
+            ? (subtypeLabel(subtype) || (isSw ? "Matengenezo" : "Maintenance"))
+            : (isSw ? "Matengenezo" : "Maintenance");
         }
 
         const isMilestone = count > 0 && (count + 1) % 10 === 0;
 
-        if (isMilestone) {
-          reply = `✅ Log saved\n\nCar: ${carName}\n${typeLabel}: ${amount.toLocaleString()} TZS\n\n🙌 ${count + 1} logs and counting — great job staying on top of your car expenses!\n\n💬 Enjoying Car Logbook? We'd love to hear from you:\nfeedback <your message>`;
-        } else {
-          reply = `✅ Log saved\n\nCar: ${carName}\n${typeLabel}: ${amount.toLocaleString()} TZS`;
-        }
+        reply = isMilestone
+          ? t(user, "log_milestone", carName, typeLabel, amount, count + 1)
+          : t(user, "log_saved", carName, typeLabel, amount);
 
         if (type === "insurance") {
-          const { data: existingInsurance } = await supabase.from("car_insurance").select("id").eq("car_id", carId).single();
-          if (!existingInsurance) {
-            reply += `\n\nWould you like to set a reminder for when it expires?\n\nJust send the date:\ninsurance expiry 15 Aug 2026`;
-          }
+          const { data: existingInsurance } = await supabase
+            .from("car_insurance").select("id").eq("car_id", carId).single();
+          if (!existingInsurance) reply += t(user, "insurance_expiry_prompt");
         }
 
-        // Auto-reset service reminder when matching maintenance is logged
         if (type === "maintenance" && subtype) {
-          // Map maintenance subtypes to service reminder keys
           const subtypeToServiceKey = {
             engine_oil:  "oil_change",
             oil_filter:  "oil_filter",
@@ -1063,7 +1081,6 @@ Or type "skip" to skip.`
           const serviceKey = subtypeToServiceKey[subtype];
 
           if (serviceKey) {
-            // Get current mileage for this car
             const { data: latestMileage } = await supabase
               .from("logs").select("mileage")
               .eq("car_id", carId).eq("type", "mileage")
@@ -1080,7 +1097,7 @@ Or type "skip" to skip.`
                 notified_at: null
               }).eq("id", serviceReminder.id);
 
-              reply += `\n\n🔔 Service reminder reset — I'll remind you again when it's due.`;
+              reply += t(user, "reminder_reset");
             }
           }
         }
@@ -1091,11 +1108,8 @@ Or type "skip" to skip.`
     }
 
     // ── AI SMART FALLBACK ─────────────────────────────────────────────────
-    const aiReply = await getAIFallbackReply(text, userCars, user.id);
-
-    await sendReply(from, aiReply ||
-      `Hmm, I didn't quite get that. 🤔\n\nHere are some things you can try:\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history\n🚗 cars\n\nOr type "help" for the full guide.\n\n💬 Something not working as expected?\nfeedback <your message>`
-    );
+    const aiReply = await getAIFallbackReply(text, userCars, user.id, user.language);
+    await sendReply(from, aiReply || t(user, "ai_fallback_default"));
     res.sendStatus(200);
 
   } catch (error) {

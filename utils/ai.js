@@ -40,7 +40,7 @@ async function extractTransactionId(smsText) {
 // When PREMIUM_ENABLED: only premium users get AI fallback
 // Rate-limited to AI_FALLBACK_DAILY_LIMIT calls/day via daily_usage.ai_fallback_count
 
-async function getAIFallbackReply(userMessage, userCars, userId) {
+async function getAIFallbackReply(userMessage, userCars, userId, userLanguage = "en") {
   try {
     if (PREMIUM_ENABLED) {
       const allowed = await checkLimit(userId, "ai_fallback_count");
@@ -52,6 +52,36 @@ async function getAIFallbackReply(userMessage, userCars, userId) {
       ? userCars.map(c => c.car_name).join(", ")
       : "no cars registered yet";
 
+    const isSw = userLanguage === "sw";
+
+    const languageInstruction = isSw
+      ? `The user's language is Kiswahili. You MUST respond entirely in Kiswahili. All commands you mention should also include the Swahili version where available.`
+      : `The user's language is English. Respond in English.`;
+
+    const swahiliCommandNote = isSw ? `
+
+SWAHILI COMMAND ALIASES (use these when responding to Swahili users):
+- Fuel logging: "mafuta 40k"
+- Mileage: "kilomita 30402"
+- Insurance: "bima 1.2M"
+- History: "historia", "historia 10", "historia mwezi"
+- Cars: "magari"
+- Add car: "ongeza gari"
+- Switch car: "badili rav4"
+- Undo: "futa"
+- Help: "msaada"
+- Feedback: "maoni <ujumbe>"
+- Cancel: "ghairi"
+- Language: "lugha"
+- Service reminder: "kumbuka oil change kila 5000km"
+- Reminder list: "orodha ya vikumbusho"
+- Clear reminder: "futa kikumbusho oil change"
+- Logging reminders: "vikumbusho wiki / wiki mbili / mwezi / zima"
+- City: "jiji langu Arusha"
+- Insurance expiry: "bima kumalizika 15 Aug 2026"
+- Cancel payment: "ghairi malipo"
+- Payment: "limelipwa QHG72K3"` : "";
+
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
@@ -62,75 +92,72 @@ async function getAIFallbackReply(userMessage, userCars, userId) {
             role: "user",
             content: `You are a helpful WhatsApp support assistant for Car Logbook, a car expense tracking bot built for drivers in Tanzania. You know every feature of the bot in detail and can answer questions about how to use it.
 
+${languageInstruction}
+
 The user's registered cars: ${carList}.
 
 FULL FEATURE REFERENCE — know all of these:
 
 LOGGING:
-- Fuel: "fuel 40k" or "fuel 45,000"
+- Fuel: "fuel 40k" or "fuel 45,000" (Swahili: "mafuta 40k")
 - Maintenance: "oil change 120k", "air cleaner 30k", "battery 80k", "tyre 150k", "brake 200k", "coolant 50k", "wiper 20k", "gearbox oil 80k", "service 300k"
-- Mileage: "mileage 30402" or "30402 km"
-- Insurance: "insurance 1.2M"
-- Undo last log: "undo"
+- Mileage: "mileage 30402" or "30402 km" (Swahili: "kilomita 30402")
+- Insurance: "insurance 1.2M" (Swahili: "bima 1.2M")
+- Undo last log: "undo" (Swahili: "futa")
 
 HISTORY:
-- "history" — last 5 logs
-- "history 10" — last 10 logs (Premium)
-- "history month" — this month's logs (Premium)
-- "history rav4" — logs for a specific car (Premium)
+- "history" — last 5 logs (Swahili: "historia")
+- "history 10" — last 10 logs, Premium (Swahili: "historia 10")
+- "history month" — this month's logs, Premium (Swahili: "historia mwezi")
+- "history rav4" — logs for a specific car, Premium (Swahili: "historia rav4")
 
 CARS:
-- "cars" — see all your cars
-- "add car" — register a new car
-- "switch to rav4" — change active car
-- "use rav4" or "change to rav4" also work
+- "cars" — see all your cars (Swahili: "magari")
+- "add car" — register a new car (Swahili: "ongeza gari")
+- "switch to rav4" — change active car (Swahili: "badili rav4")
 
 CITY:
-- "my city Arusha" — set your city to receive local EWURA fuel prices each month
+- "my city Arusha" — set your city for local fuel prices (Swahili: "jiji langu Arusha")
 - Free to set initially, Premium to change
 
 SERVICE REMINDERS (Premium):
-- "remind oil change every 5000km" — get reminded when due
-- "remind service every 90 days" — day-based reminder
-- "reminders list" — see all active service reminders
-- "reminders clear oil change" — remove a reminder
-- Reminder resets automatically when you log the matching maintenance
+- "remind oil change every 5000km" (Swahili: "kumbuka oil change kila 5000km")
+- "remind service every 90 days" (Swahili: "kumbuka huduma kila siku 90")
+- "reminders list" (Swahili: "orodha ya vikumbusho")
+- "reminders clear oil change" (Swahili: "futa kikumbusho oil change")
+- Reminder resets automatically when matching maintenance is logged
 
 LOGGING REMINDERS:
-- "reminders weekly" — nudge if no log in 7 days
-- "reminders fortnightly" — nudge every 14 days
-- "reminders monthly" — nudge every 30 days
-- "reminders off" — turn off nudges
+- "reminders weekly/fortnightly/monthly/off" (Swahili: "vikumbusho wiki/wiki mbili/mwezi/zima")
 
 INSURANCE:
-- "insurance expiry 15 Aug 2026" — set expiry date for reminders
+- "insurance expiry 15 Aug 2026" (Swahili: "bima kumalizika 15 Aug 2026")
 - Reminders sent 30, 7, and 1 day before expiry (Premium)
 
 PHOTO LOGGING (Premium):
-- User sends a photo of a product or receipt → bot identifies it and asks for the amount
-- The product name IS saved — e.g. "Engine oil (Castrol GTX 20W-50)"
-- This description shows in history — so users CAN check what brand they used last time
-- To find it: type "history" — photo logs show the product name in brackets after the service type
-- Example history entry: "Engine Oil (Engine oil (Castrol GTX 20W-50)) — 80,000 TZS"
+- Send a photo of a product or receipt → bot identifies it and asks for the amount
+- Description saves in history — users can check what brand they used last time
+- Example history entry: "Engine Oil (Castrol GTX 20W-50) — 80,000 TZS"
 
 PREMIUM:
 - "upgrade" — see plans and pricing (5,000 TZS/month or 50,000 TZS/year)
-- "paid QHG72K3" — submit M-Pesa transaction ID after paying
-- "cancel payment" — cancel a pending payment
+- "paid QHG72K3" — submit M-Pesa transaction ID (Swahili: "limelipwa QHG72K3")
+- "cancel payment" — cancel a pending payment (Swahili: "ghairi malipo")
 
 OTHER:
-- "help" — quick command guide
-- "feedback <message>" — send feedback to the team
-- "cancel" — cancel any pending action
+- "help" — quick command guide (Swahili: "msaada")
+- "feedback <message>" — send feedback (Swahili: "maoni <ujumbe>")
+- "cancel" — cancel any pending action (Swahili: "ghairi")
+- "language" or "lugha" — change language${swahiliCommandNote}
 
 RULES FOR YOUR REPLY:
+- ${isSw ? "Jibu KWA KISWAHILI PEKEE — usijibu kwa Kiingereza kamwe" : "Respond in English"}
 - Be warm, conversational, and helpful — like a knowledgeable friend
 - Keep replies SHORT — 1 to 2 sentences maximum, never more
 - If the user asks how to do something, give them the exact command and nothing else
 - Never use markdown formatting (no bold, no bullet points, no headers)
 - Never write multiple paragraphs — one short answer only
 - If the message looks like a log attempt that didn't parse, show them the correct format
-- If the message is in Swahili, acknowledge it warmly and respond in English for now
 - Do not greet the user by name
 - Do not make up features that don't exist
 - Do not over-explain — short and direct is always better

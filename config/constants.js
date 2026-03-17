@@ -1,10 +1,10 @@
 // ─── FEATURE FLAGS ────────────────────────────────────────────────────────────
 
 // Set to true to enforce free vs premium restrictions
-const PREMIUM_ENABLED = false;
+const PREMIUM_ENABLED = true;
 
 // AI fallback: max calls per user per day (applies when PREMIUM_ENABLED = true)
-const AI_FALLBACK_DAILY_LIMIT = 3;
+const AI_FALLBACK_DAILY_LIMIT = 5;
 
 // ─── ENVIRONMENT ──────────────────────────────────────────────────────────────
 
