@@ -40,18 +40,16 @@ async function checkLimit(userId, field) {
 
 // Increment a usage counter for today
 async function incrementUsage(userId, field) {
-  const today = new Date().toISOString().split("T")[0];
+  const usage = await getDailyUsage(userId);
+  if (!usage) return;
 
-  // Upsert then increment — handles race conditions gracefully
+  const currentValue = usage[field] || 0;
+
   await supabase
     .from("daily_usage")
-    .upsert({ user_id: userId, date: today }, { onConflict: "user_id,date" });
-
-  await supabase.rpc("increment_daily_usage", {
-    p_user_id: userId,
-    p_date: today,
-    p_field: field
-  });
+    .update({ [field]: currentValue + 1 })
+    .eq("user_id", userId)
+    .eq("date", usage.date);
 }
 
 module.exports = { checkLimit, incrementUsage, LIMITS };
