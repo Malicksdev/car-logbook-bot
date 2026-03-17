@@ -258,7 +258,36 @@ router.post("/", async (req, res) => {
     if (detectedCars.length === 1) carId = detectedCars[0].id;
 
     // ── LANGUAGE COMMAND ──────────────────────────────────────────────────
-    if (lower === "language" || lower === "lugha") {
+    // Direct switch phrases — no prompt needed, switch immediately
+    const switchToEnglish = [
+      "change language to english", "switch language to english",
+      "switch to english", "change to english",
+      "badili lugha kiingereza", "kiingereza"
+    ];
+    const switchToSwahili = [
+      "change language to swahili", "switch language to swahili",
+      "change language to kiswahili", "switch language to kiswahili",
+      "switch to swahili", "change to swahili",
+      "switch to kiswahili", "change to kiswahili",
+      "badili lugha kiswahili", "kiswahili"
+    ];
+
+    if (switchToEnglish.includes(lower)) {
+      await supabase.from("users").update({ language: "en", onboarding_step: null }).eq("id", user.id);
+      const updatedUser = { ...user, language: "en" };
+      await sendReply(from, t(updatedUser, "language_switched_en"));
+      return res.sendStatus(200);
+    }
+
+    if (switchToSwahili.includes(lower)) {
+      await supabase.from("users").update({ language: "sw", onboarding_step: null }).eq("id", user.id);
+      const updatedUser = { ...user, language: "sw" };
+      await sendReply(from, t(updatedUser, "language_switched_sw"));
+      return res.sendStatus(200);
+    }
+
+    // Prompt-based switch — show options
+    if (lower === "language" || lower === "lugha" || lower === "change language" || lower === "badili lugha") {
       await supabase.from("users").update({ onboarding_step: "awaiting_language_switch" }).eq("id", user.id);
       await sendReply(from, t(user, "language_switch_prompt"));
       return res.sendStatus(200);
@@ -1108,7 +1137,7 @@ Questions? contact@carlogbook.app`
     }
 
     // ── AI SMART FALLBACK ─────────────────────────────────────────────────
-    const aiReply = await getAIFallbackReply(text, userCars, user.id, user.language);
+    const aiReply = await getAIFallbackReply(text, userCars, user.id);
     await sendReply(from, aiReply || t(user, "ai_fallback_default"));
     res.sendStatus(200);
 

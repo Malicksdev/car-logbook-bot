@@ -44,7 +44,12 @@ async function getAIFallbackReply(userMessage, userCars, userId, userLanguage = 
   try {
     if (PREMIUM_ENABLED) {
       const allowed = await checkLimit(userId, "ai_fallback_count");
-      if (!allowed) return null;
+      if (!allowed) {
+        const isSw = userLanguage === "sw";
+        return isSw
+          ? `Umefika kikomo chako cha msaada wa AI leo — inarejea kesho! Unaweza kuendelea kurekodi kawaida: mafuta 40k, oil change 120k, kilomita 30402. Andika "msaada" kwa amri zote. Ungependa msaada wa AI bila kikomo? upgrade ⭐`
+          : `You've used your AI assist for today — it resets tomorrow! You can still log normally: fuel 40k, oil change 120k, mileage 30402. Type "help" for all commands. Want unlimited AI assist? upgrade ⭐`;
+      }
       await incrementUsage(userId, "ai_fallback_count");
     }
 
@@ -131,8 +136,10 @@ LOGGING REMINDERS:
 - "reminders weekly/fortnightly/monthly/off" (Swahili: "vikumbusho wiki/wiki mbili/mwezi/zima")
 
 INSURANCE:
-- "insurance expiry 15 Aug 2026" (Swahili: "bima kumalizika 15 Aug 2026")
-- Reminders sent 30, 7, and 1 day before expiry (Premium)
+- Log insurance cost: "insurance 1.2M" (Swahili: "bima 1.2M")
+- Set expiry date: "insurance expiry 15 Aug 2026" (Swahili: "bima kumalizika 15 Aug 2026")
+- Insurance expiry reminders are a PREMIUM feature — reminders sent 30, 7, and 1 day before expiry
+- Free users can still log insurance costs and set expiry dates, but won't get reminders
 
 PHOTO LOGGING (Premium):
 - Send a photo of a product or receipt → bot identifies it and asks for the amount
