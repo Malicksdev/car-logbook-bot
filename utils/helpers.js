@@ -415,6 +415,16 @@ Kidokezo: Andika tu ulichofanya kwa kawaida — nitaelewa!`
     sw: (name) => `👋 Ukumbusho wa mwisho kutoka kwangu, ${name} — Car Logbook yako imewekwa na iko tayari ukihitaji.\n\nUkijaza mafuta au kufanya huduma, andika tu:\n⛽ mafuta 40k\n🔧 oil change 120k\n\nNitakuwepo. 🚗`
   },
 
+  dropoff_no_car: {
+    en: (name) => `👋 Hey ${name}! You started setting up Car Logbook but didn't finish adding your car.\n\nPick up where you left off — what's your car's plate number?\n\nExample: T123ABC`,
+    sw: (name) => `👋 Habari ${name}! Ulianza kusanidi Car Logbook lakini hukumaliza kuongeza gari lako.\n\nEndelea ulipoacha — nambari ya usajili wa gari lako ni nini?\n\nMfano: T123ABC`
+  },
+
+  dropoff_stuck_plate: {
+    en: (name) => `👋 Hey ${name}! It looks like you were in the middle of adding a car.\n\nWhat's the plate number?\n\nExample: T123ABC\n\nOr type "cancel" to start over.`,
+    sw: (name) => `👋 Habari ${name}! Inaonekana ulikuwa ukiongeza gari.\n\nNambari ya usajili ni nini?\n\nMfano: T123ABC\n\nAu andika "ghairi" kuanza upya.`
+  },
+
   service_reminder_premium_required: {
     en: `⭐ Service reminders are a Premium feature.\n\nUpgrade to set reminders for oil changes, tyre rotations, and more:\nupgrade`,
     sw: `⭐ Vikumbusho vya huduma ni kipengele cha Premium.\n\nPanda daraja kuweka vikumbusho vya kubadilisha mafuta, kuzungusha matairi, na zaidi:\nupgrade`

@@ -117,7 +117,7 @@ router.get("/check-premium", async (req, res) => {
   // Day 1, 3, 7 after joining — then hands off to regular inactive reminders
   const { data: neverLoggedUsers } = await supabase
     .from("users")
-    .select("id, name, phone_number, created_at, last_reminder_sent_at, language")
+    .select("id, name, phone_number, created_at, last_reminder_sent_at, language, pending_plate")
     .is("last_log_at", null);
 
   let dropoffNudges = 0;
@@ -140,12 +140,31 @@ router.get("/check-premium", async (req, res) => {
         if (hoursSinceReminder < 47) continue; // at least 47hrs between nudges
       }
 
-      let nudgeKey = null;
-      if (daysSinceJoin >= 6)      nudgeKey = "dropoff_nudge_day7";
-      else if (daysSinceJoin >= 2)  nudgeKey = "dropoff_nudge_day3";
-      else                          nudgeKey = "dropoff_nudge_day1";
+      // ── SCENARIO C: stuck mid-plate entry ─────────────────────────────
+      // User typed "add car" but never sent the plate number
+      if (u.pending_plate === "AWAITING") {
+        await sendReply(u.phone_number, t(u, "dropoff_stuck_plate", u.name));
+        // Note: we do NOT clear pending_plate — bot will resume flow when they reply
 
-      await sendReply(u.phone_number, t(u, nudgeKey, u.name));
+      // ── SCENARIO A: no car registered at all ──────────────────────────
+      // User dropped off before or during plate/name entry
+      } else {
+        const { data: userCars } = await supabase
+          .from("car_users").select("car_id").eq("user_id", u.id).limit(1);
+
+        if (!userCars || userCars.length === 0) {
+          await sendReply(u.phone_number, t(u, "dropoff_no_car", u.name));
+
+        // ── SCENARIO B: completed onboarding but never logged ─────────────
+        } else {
+          let nudgeKey = null;
+          if (daysSinceJoin >= 6)      nudgeKey = "dropoff_nudge_day7";
+          else if (daysSinceJoin >= 2)  nudgeKey = "dropoff_nudge_day3";
+          else                          nudgeKey = "dropoff_nudge_day1";
+
+          await sendReply(u.phone_number, t(u, nudgeKey, u.name));
+        }
+      }
       await supabase.from("users")
         .update({ last_reminder_sent_at: now.toISOString() })
         .eq("id", u.id);
