@@ -1138,7 +1138,7 @@ Questions? contact@carlogbook.app`
     }
 
     // ── AI SMART FALLBACK ─────────────────────────────────────────────────
-    const aiReply = await getAIFallbackReply(text, userCars, user.id);
+    const aiReply = await getAIFallbackReply(text, userCars, user.id, user.language);
     await sendReply(from, aiReply || t(user, "ai_fallback_default"));
     res.sendStatus(200);
 
