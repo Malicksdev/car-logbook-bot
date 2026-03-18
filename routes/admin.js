@@ -158,6 +158,7 @@ upgrade`
 
 Name: ${targetUser.name}
 Phone: ${targetPhone}
+Language: ${targetUser.language === "sw" ? "Kiswahili 🇹🇿" : "English 🇬🇧"}
 Joined: ${joined}
 Plan: ${planStatus}
 City: ${targetUser.city || "Not set"}
@@ -256,6 +257,8 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
     const { count: totalLogs }        = await supabase.from("logs").select("*", { count: "exact", head: true });
     const { count: usersWithCity }    = await supabase.from("users").select("*", { count: "exact", head: true }).not("city", "is", null);
     const { count: remindersOff }     = await supabase.from("users").select("*", { count: "exact", head: true }).eq("reminder_frequency", "off");
+    const { count: neverLogged }      = await supabase.from("users").select("*", { count: "exact", head: true }).is("last_log_at", null);
+    const { count: swahiliUsers }     = await supabase.from("users").select("*", { count: "exact", head: true }).eq("language", "sw");
     const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const { count: newUsersThisWeek } = await supabase.from("users").select("*", { count: "exact", head: true }).gte("created_at", oneWeekAgo);
     const { count: pendingCount }     = await supabase.from("payments").select("*", { count: "exact", head: true }).eq("status", "pending");
@@ -266,19 +269,17 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
 👥 Total users: ${totalUsers || 0}
 ⭐ Premium users: ${premiumUsers || 0}
 🆕 New this week: ${newUsersThisWeek || 0}
+⚠️ Never logged: ${neverLogged || 0}
 📋 Total logs: ${totalLogs || 0}
 💰 Pending payments: ${pendingCount || 0}
 📍 Users with city: ${usersWithCity || 0}
+🌍 Swahili users: ${swahiliUsers || 0}
 🔕 Reminders off: ${remindersOff || 0}`
     );
     return true;
   }
 
   // BROADCAST
-  // Usage:
-  //   broadcast <message>                        — text only
-  //   broadcast image <url> <caption>            — image with caption
-  //   broadcast video <url> <caption>            — video with caption
   if (text.toLowerCase().startsWith("broadcast ")) {
     const broadcastBody = text.slice(10).trim();
     if (!broadcastBody) {
@@ -288,7 +289,6 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
       return true;
     }
 
-    // Detect media broadcast
     const mediaMatch = broadcastBody.match(/^(image|video)\s+(https?:\/\/\S+)\s*(.*)?$/i);
     const isMedia = !!mediaMatch;
     const mediaType = isMedia ? mediaMatch[1].toLowerCase() : null;
@@ -420,20 +420,27 @@ Last fuel: ${lastFuel ? `${lastFuel.amount?.toLocaleString()} TZS on ${new Date(
       try {
         const userCity = u.city ? u.city.toLowerCase().trim() : null;
         const cityPrice = userCity ? priceMap[userCity] : null;
+        const isSw = u.language === "sw";
 
-        let msg = `⛽ EWURA Fuel Prices — ${monthLabel}\n\n`;
+        let msg = isSw
+          ? `⛽ Bei za Mafuta EWURA — ${monthLabel}\n\n`
+          : `⛽ EWURA Fuel Prices — ${monthLabel}\n\n`;
 
         if (cityPrice) {
           msg += `📍 ${u.city}\n`;
-          msg += `Petrol: ${cityPrice.petrol?.toLocaleString()} TZS/L\n`;
-          msg += `Diesel: ${cityPrice.diesel?.toLocaleString()} TZS/L\n`;
-          msg += `Kerosene: ${cityPrice.kerosene?.toLocaleString()} TZS/L\n`;
+          msg += `${isSw ? "Petrol" : "Petrol"}: ${cityPrice.petrol?.toLocaleString()} TZS/L\n`;
+          msg += `${isSw ? "Diesel" : "Diesel"}: ${cityPrice.diesel?.toLocaleString()} TZS/L\n`;
+          msg += `${isSw ? "Taa" : "Kerosene"}: ${cityPrice.kerosene?.toLocaleString()} TZS/L\n`;
         } else {
           msg += `${highlights}\n`;
-          if (!userCity) msg += `\n📍 Set your city for local prices:\nmy city Arusha`;
+          if (!userCity) msg += isSw
+            ? `\n📍 Weka jiji lako kwa bei za mtaa:\njiji langu Arusha`
+            : `\n📍 Set your city for local prices:\nmy city Arusha`;
         }
 
-        msg += `\n─────────────────\nSource: EWURA Tanzania\nEffective: ${monthLabel}`;
+        msg += isSw
+          ? `\n─────────────────\nChanzo: EWURA Tanzania\nKuanzia: ${monthLabel}`
+          : `\n─────────────────\nSource: EWURA Tanzania\nEffective: ${monthLabel}`;
 
         await sendReply(u.phone_number, msg);
         await sleep(100);

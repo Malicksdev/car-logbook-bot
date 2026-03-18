@@ -93,8 +93,8 @@ const translations = {
   },
 
   onboarding_complete: {
-    en: (fuelMsg) => `✅ ${fuelMsg}\n\nYou're all set! Here's how to get started:\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n📒 history\n\nType "help" anytime.`,
-    sw: (fuelMsg) => `✅ ${fuelMsg}\n\nUmemaliza! Hivi ndivyo unavyoweza kuanza:\n\n⛽ mafuta 40k\n🔧 oil change 120k\n📏 kilomita 30402\n📒 historia\n\nAndika "help" wakati wowote.`
+    en: (name) => `🎉 You're all set, ${name}!\n\nYour first log takes 5 seconds — how much did you last spend on fuel?\n\nJust reply with something like:\n⛽ fuel 40k\n\nThat's it. I'll take care of the rest.`,
+    sw: (name) => `🎉 Umekamilisha, ${name}!\n\nIngizo lako la kwanza linachukua sekunde 5 — ulitumia kiasi gani mara ya mwisho kwa mafuta?\n\nJibu tu kitu kama:\n⛽ mafuta 40k\n\nHiyo tu. Mimi nitashughulikia mengine.`
   },
 
   fuel_type_saved: {
@@ -398,6 +398,21 @@ Kidokezo: Andika tu ulichofanya kwa kawaida — nitaelewa!`
   reminder_transition: {
     en: (name) => `👋 Hey ${name}! You've been using Car Logbook for a month — great work staying on top of your car expenses! 🎉\n\nI'll now check in weekly instead of every 3 days. You can always adjust this:\n\nreminders weekly\nreminders fortnightly\nreminders monthly\nreminders off`,
     sw: (name) => `👋 Habari ${name}! Umetumia Car Logbook kwa mwezi mmoja — hongera kwa kufuatilia gharama za gari lako! 🎉\n\nSasa nitakukagua kila wiki badala ya kila siku 3. Unaweza kubadilisha hili wakati wowote:\n\nvikumbusho wiki\nvikumbusho wiki mbili\nvikumbusho mwezi\nvikumbusho zima`
+  },
+
+  dropoff_nudge_day1: {
+    en: (name) => `👋 Hey ${name}! Just checking in — have you had a chance to log your first expense yet?\n\nIt takes 5 seconds:\n⛽ fuel 40k\n\nOnce you've done your first log, you'll see how easy it is to keep going. 🚗`,
+    sw: (name) => `👋 Habari ${name}! Nakagua tu — je, umeweza kurekodi gharama yako ya kwanza bado?\n\nInachukua sekunde 5:\n⛽ mafuta 40k\n\nUkifanya ingizo lako la kwanza, utaona jinsi ilivyo rahisi kuendelea. 🚗`
+  },
+
+  dropoff_nudge_day3: {
+    en: (name) => `👋 Hey ${name}! Still here when you're ready.\n\nTracking even just fuel takes 5 seconds and adds up to real insight over time — you'll always know what your car is costing you.\n\n⛽ fuel 40k\n\nGive it a try!`,
+    sw: (name) => `👋 Habari ${name}! Bado nipo hapa ukiwa tayari.\n\nKufuatilia hata mafuta tu kunachukua sekunde 5 na kutoa maarifa ya kweli kwa muda — utajua kila wakati gari lako linakugharimu kiasi gani.\n\n⛽ mafuta 40k\n\nJaribu!`
+  },
+
+  dropoff_nudge_day7: {
+    en: (name) => `👋 Last nudge from me, ${name} — your Car Logbook is set up and ready whenever you need it.\n\nWhenever you fill up or do a service, just type:\n⛽ fuel 40k\n🔧 oil change 120k\n\nI'll be here. 🚗`,
+    sw: (name) => `👋 Ukumbusho wa mwisho kutoka kwangu, ${name} — Car Logbook yako imewekwa na iko tayari ukihitaji.\n\nUkijaza mafuta au kufanya huduma, andika tu:\n⛽ mafuta 40k\n🔧 oil change 120k\n\nNitakuwepo. 🚗`
   },
 
   service_reminder_premium_required: {

@@ -532,11 +532,12 @@ router.post("/", async (req, res) => {
         await supabase.from("cars").update({ fuel_type: fuelType }).eq("id", carId);
       }
 
-      const fuelMsg = fuelType
-        ? t(user, "fuel_type_saved", fuelType)
-        : t(user, "fuel_type_skipped");
+      // Save fuel type silently — confirmation is baked into the onboarding_complete message
+      if (fuelType && carId) {
+        // already saved above — no separate confirmation needed
+      }
 
-      await sendReply(from, t(user, "onboarding_complete", fuelMsg));
+      await sendReply(from, t(user, "onboarding_complete", user.name));
       return res.sendStatus(200);
     }
 

@@ -112,11 +112,60 @@ router.get("/check-premium", async (req, res) => {
     }
   }
 
+  // ── DROP-OFF NUDGE: users who completed onboarding but never logged ────
+  // Separate from inactive reminders — targets last_log_at IS NULL
+  // Day 1, 3, 7 after joining — then hands off to regular inactive reminders
+  const { data: neverLoggedUsers } = await supabase
+    .from("users")
+    .select("id, name, phone_number, created_at, last_reminder_sent_at, language")
+    .is("last_log_at", null);
+
+  let dropoffNudges = 0;
+
+  for (const u of neverLoggedUsers || []) {
+    try {
+      const joinedAt = new Date(u.created_at);
+      const daysSinceJoin = (now - joinedAt) / (1000 * 60 * 60 * 24);
+
+      // Only fire during the first 7 days
+      if (daysSinceJoin > 7) continue;
+
+      // Don't nudge in the first 20 hours — give them time to explore
+      if (daysSinceJoin < 0.8) continue;
+
+      // Don't re-nudge if already sent a reminder recently
+      if (u.last_reminder_sent_at) {
+        const lastReminderAt = new Date(u.last_reminder_sent_at);
+        const hoursSinceReminder = (now - lastReminderAt) / (1000 * 60 * 60);
+        if (hoursSinceReminder < 47) continue; // at least 47hrs between nudges
+      }
+
+      let nudgeKey = null;
+      if (daysSinceJoin >= 6)      nudgeKey = "dropoff_nudge_day7";
+      else if (daysSinceJoin >= 2)  nudgeKey = "dropoff_nudge_day3";
+      else                          nudgeKey = "dropoff_nudge_day1";
+
+      await sendReply(u.phone_number, t(u, nudgeKey, u.name));
+      await supabase.from("users")
+        .update({ last_reminder_sent_at: now.toISOString() })
+        .eq("id", u.id);
+
+      dropoffNudges++;
+      await sleep(100);
+    } catch (err) {
+      console.error("Drop-off nudge error for " + u.phone_number + ":", err.message);
+    }
+  }
+
+  console.log("Drop-off nudges sent: " + dropoffNudges);
+
   // ── INACTIVE USER REMINDERS ────────────────────────────────────────────
+  // Only runs for users who HAVE logged at least once (last_log_at is not null)
   const { data: allUsersForReminder } = await supabase
     .from("users")
     .select("id, name, phone_number, created_at, last_log_at, last_reminder_sent_at, reminder_frequency, language")
-    .neq("reminder_frequency", "off");
+    .neq("reminder_frequency", "off")
+    .not("last_log_at", "is", null);
 
   let inactiveReminders = 0;
   const gracePeriodDays = 3;
@@ -359,7 +408,7 @@ reminders list`
   }
 
   console.log(`Service reminders sent: ${serviceReminders}`);
-  return res.status(200).json({ warned3, warned1, downgraded, insuranceReminders, inactiveReminders, serviceReminders });
+  return res.status(200).json({ warned3, warned1, downgraded, insuranceReminders, dropoffNudges, inactiveReminders, serviceReminders });
 });
 
 // ─── CRON: MONTHLY SUMMARY ────────────────────────────────────────────────────
