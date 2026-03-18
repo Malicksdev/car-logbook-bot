@@ -3,7 +3,7 @@ const router = express.Router();
 
 const supabase = require("../config/supabase");
 const { sendReply } = require("../utils/sendReply");
-const { isPremium, subtypeLabel, sleep, reminderDays, serviceTypeLabel } = require("../utils/helpers");
+const { isPremium, subtypeLabel, sleep, reminderDays, serviceTypeLabel, t } = require("../utils/helpers");
 const { ADMIN_PHONE } = require("../config/constants");
 
 // ─── CRON: CHECK PREMIUM EXPIRY + INSURANCE + INACTIVE REMINDERS ──────────────
@@ -115,33 +115,96 @@ router.get("/check-premium", async (req, res) => {
   // ── INACTIVE USER REMINDERS ────────────────────────────────────────────
   const { data: allUsersForReminder } = await supabase
     .from("users")
-    .select("id, name, phone_number, created_at, last_log_at, last_reminder_sent_at, reminder_frequency")
+    .select("id, name, phone_number, created_at, last_log_at, last_reminder_sent_at, reminder_frequency, language")
     .neq("reminder_frequency", "off");
 
   let inactiveReminders = 0;
   const gracePeriodDays = 3;
+  const NEW_USER_PERIOD_DAYS = 30;
+  const NEW_USER_FREQ_DAYS = 3;
 
   for (const u of allUsersForReminder || []) {
     try {
       const joinedAt = new Date(u.created_at);
       const daysSinceJoin = (now - joinedAt) / (1000 * 60 * 60 * 24);
+
+      // Skip brand new users — give them a grace period first
       if (daysSinceJoin < gracePeriodDays) continue;
 
-      const freqDays = reminderDays(u.reminder_frequency || "7days");
-      const freqMs = freqDays * 24 * 60 * 60 * 1000;
+      // ── TRANSITION: new user period just ended ─────────────────────────
+      // Fires once when user crosses 30 days — sends transition message
+      // and switches reminder_frequency to 7days
+      const justCrossed30Days = daysSinceJoin >= NEW_USER_PERIOD_DAYS &&
+        daysSinceJoin < NEW_USER_PERIOD_DAYS + 1 &&
+        (u.reminder_frequency === "3days" || u.reminder_frequency === null);
 
-      const lastLog = u.last_log_at ? new Date(u.last_log_at) : joinedAt;
-      const daysSinceLog = (now - lastLog) / (1000 * 60 * 60 * 24);
-      if (daysSinceLog < freqDays) continue;
+      if (justCrossed30Days) {
+        await supabase.from("users")
+          .update({
+            reminder_frequency: "7days",
+            last_reminder_sent_at: now.toISOString()
+          })
+          .eq("id", u.id);
 
-      if (u.last_reminder_sent_at) {
-        const lastReminderAt = new Date(u.last_reminder_sent_at);
-        if ((now - lastReminderAt) < freqMs) continue;
+        await sendReply(u.phone_number, t(u, "reminder_transition", u.name));
+        inactiveReminders++;
+        await sleep(100);
+        continue;
       }
 
-      const freqLabel = freqDays === 7 ? "week" : freqDays === 14 ? "2 weeks" : "month";
+      // ── DETERMINE EFFECTIVE FREQUENCY ─────────────────────────────────
+      // New users (under 30 days) always use 3-day frequency
+      // regardless of their reminder_frequency setting
+      const isNewUserPeriod = daysSinceJoin < NEW_USER_PERIOD_DAYS;
+      const effectiveFreqDays = isNewUserPeriod
+        ? NEW_USER_FREQ_DAYS
+        : reminderDays(u.reminder_frequency || "7days");
+      const effectiveFreqMs = effectiveFreqDays * 24 * 60 * 60 * 1000;
 
-      await sendReply(u.phone_number,
+      // Check if enough time has passed since last log
+      const lastLog = u.last_log_at ? new Date(u.last_log_at) : joinedAt;
+      const daysSinceLog = (now - lastLog) / (1000 * 60 * 60 * 24);
+      if (daysSinceLog < effectiveFreqDays) continue;
+
+      // Check if enough time has passed since last reminder
+      if (u.last_reminder_sent_at) {
+        const lastReminderAt = new Date(u.last_reminder_sent_at);
+        if ((now - lastReminderAt) < effectiveFreqMs) continue;
+      }
+
+      // ── SEND REMINDER ──────────────────────────────────────────────────
+      if (isNewUserPeriod) {
+        // New user — send habit-building message
+        await sendReply(u.phone_number, t(u, "reminder_new_user", u.name));
+      } else {
+        // Established user — send standard nudge
+        const freqLabel = effectiveFreqDays === 7
+          ? (u.language === "sw" ? "wiki" : "week")
+          : effectiveFreqDays === 14
+            ? (u.language === "sw" ? "wiki mbili" : "2 weeks")
+            : (u.language === "sw" ? "mwezi" : "month");
+
+        if (u.language === "sw") {
+          await sendReply(u.phone_number,
+`👋 Habari ${u.name}! Imepita ${freqLabel} tangu rekodi yako ya mwisho.
+
+Kuweka daftari lako la kisasa kunachukua sekunde chache tu:
+
+⛽ mafuta 40k
+🔧 oil change 120k
+📏 kilomita 30402
+
+Historia ya gari lako ni nzuri kama unavyorekodi. 🚗
+
+─────────────────
+Kubadili mara ya vikumbusho:
+vikumbusho wiki
+vikumbusho wiki mbili
+vikumbusho mwezi
+vikumbusho zima`
+          );
+        } else {
+          await sendReply(u.phone_number,
 `👋 Hey ${u.name}! It's been a ${freqLabel} since your last log.
 
 Keeping your logbook up to date takes just a few seconds:
@@ -158,13 +221,17 @@ reminders weekly
 reminders fortnightly
 reminders monthly
 reminders off`
-      );
+          );
+        }
+      }
 
       await supabase.from("users")
         .update({ last_reminder_sent_at: now.toISOString() })
         .eq("id", u.id);
 
       inactiveReminders++;
+      await sleep(100);
+
     } catch (err) {
       console.error(`Inactive reminder error for ${u.phone_number}:`, err.message);
     }
@@ -205,10 +272,6 @@ ewura broadcast`
   console.log(`Insurance reminders sent: ${insuranceReminders}`);
 
   // ── SERVICE INTERVAL REMINDERS ─────────────────────────────────────────
-  // For each service reminder: check if km or days threshold exceeded
-  // Only fires for premium users
-  // Skips if already notified since last service reset
-
   const { data: allReminders } = await supabase
     .from("service_reminders")
     .select("*, cars (id, car_name, car_users (users (id, phone_number, is_premium, is_lifetime, premium_until)))");
@@ -224,12 +287,10 @@ ewura broadcast`
         const u = link.users;
         if (!u) continue;
 
-        // Premium only
         const userIsPremium = u.is_lifetime || (u.is_premium && u.premium_until &&
           new Date(u.premium_until).getTime() + 3 * 24 * 60 * 60 * 1000 > Date.now());
         if (!userIsPremium) continue;
 
-        // Already notified since last service reset — skip
         if (reminder.notified_at && reminder.last_serviced_at &&
             new Date(reminder.notified_at) > new Date(reminder.last_serviced_at)) continue;
 
@@ -237,7 +298,6 @@ ewura broadcast`
         let isDue = false;
         let dueReason = "";
 
-        // Check km-based trigger
         if (reminder.interval_km) {
           const { data: latestMileage } = await supabase
             .from("logs").select("mileage")
@@ -250,12 +310,9 @@ ewura broadcast`
               isDue = true;
               dueReason = `${kmSince.toLocaleString()} km since last ${label.toLowerCase()}`;
             }
-          } else if (latestMileage?.mileage && !reminder.last_serviced_km) {
-            // No last serviced km recorded — fall back to days
           }
         }
 
-        // Fall back to days-based trigger if no km trigger fired
         if (!isDue && reminder.interval_days) {
           const lastDate = reminder.last_serviced_at ? new Date(reminder.last_serviced_at) : new Date(reminder.created_at);
           const daysSince = (now - lastDate) / (1000 * 60 * 60 * 24);
@@ -265,11 +322,9 @@ ewura broadcast`
           }
         }
 
-        // Also fall back to days if km interval set but no mileage logged at all
         if (!isDue && reminder.interval_km && !reminder.last_serviced_km) {
           const lastDate = reminder.last_serviced_at ? new Date(reminder.last_serviced_at) : new Date(reminder.created_at);
           const daysSince = (now - lastDate) / (1000 * 60 * 60 * 24);
-          // Use a 90-day fallback if no mileage data available
           if (daysSince >= 90) {
             isDue = true;
             dueReason = `over 90 days since last ${label.toLowerCase()} (no mileage data available)`;

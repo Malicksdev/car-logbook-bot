@@ -390,6 +390,16 @@ Kidokezo: Andika tu ulichofanya kwa kawaida — nitaelewa!`
     sw: (option, days) => `✅ Vikumbusho vimewekwa kuwa ${option}.\n\nNitakukumbusha ikiwa haujarekodia chochote kwa ${days}.`
   },
 
+  reminder_new_user: {
+    en: (name) => `👋 Hey ${name}! Just a nudge — have you logged your car expenses recently?\n\nKeeping your logbook up to date takes just a few seconds:\n\n⛽ fuel 40k\n🔧 oil change 120k\n📏 mileage 30402\n\nI'll check in every 3 days while you're getting started — building the habit early makes all the difference! 🚗\n\n─────────────────\nTo change reminder frequency:\nreminders weekly\nreminders off`,
+    sw: (name) => `👋 Habari ${name}! Ukumbusho tu — je, umerekodia gharama za gari lako hivi karibuni?\n\nKuweka daftari lako la kisasa kunachukua sekunde chache tu:\n\n⛽ mafuta 40k\n🔧 oil change 120k\n📏 kilomita 30402\n\nNitakukagua kila siku 3 unapoanza — kujenga tabia mapema kunafanya tofauti kubwa! 🚗\n\n─────────────────\nKubadili mara ya vikumbusho:\nvikumbusho wiki\nvikumbusho zima`
+  },
+
+  reminder_transition: {
+    en: (name) => `👋 Hey ${name}! You've been using Car Logbook for a month — great work staying on top of your car expenses! 🎉\n\nI'll now check in weekly instead of every 3 days. You can always adjust this:\n\nreminders weekly\nreminders fortnightly\nreminders monthly\nreminders off`,
+    sw: (name) => `👋 Habari ${name}! Umetumia Car Logbook kwa mwezi mmoja — hongera kwa kufuatilia gharama za gari lako! 🎉\n\nSasa nitakukagua kila wiki badala ya kila siku 3. Unaweza kubadilisha hili wakati wowote:\n\nvikumbusho wiki\nvikumbusho wiki mbili\nvikumbusho mwezi\nvikumbusho zima`
+  },
+
   service_reminder_premium_required: {
     en: `⭐ Service reminders are a Premium feature.\n\nUpgrade to set reminders for oil changes, tyre rotations, and more:\nupgrade`,
     sw: `⭐ Vikumbusho vya huduma ni kipengele cha Premium.\n\nPanda daraja kuweka vikumbusho vya kubadilisha mafuta, kuzungusha matairi, na zaidi:\nupgrade`
@@ -600,7 +610,7 @@ function subtypeLabel(subtype) {
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function reminderDays(frequency) {
-  const map = { "7days": 7, "14days": 14, "30days": 30 };
+  const map = { "3days": 3, "7days": 7, "14days": 14, "30days": 30 };
   return map[frequency] || 7;
 }
 
