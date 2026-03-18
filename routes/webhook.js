@@ -1016,7 +1016,11 @@ Questions? contact@carlogbook.app`
 
       const car = await registerCar(user.id, plate, carName);
       if (userCars.length === 0) await setActiveCar(user.id, car.id);
-      await supabase.from("users").update({ pending_plate: null }).eq("id", user.id);
+
+      // Reset last_reminder_sent_at on first car registration so drop-off
+      // nudge fires fresh after onboarding — clears any pre-onboarding reminder timestamp
+      const reminderReset = userCars.length === 0 ? { pending_plate: null, last_reminder_sent_at: null } : { pending_plate: null };
+      await supabase.from("users").update(reminderReset).eq("id", user.id);
 
       const isFirstCar = userCars.length === 0;
 
@@ -1138,7 +1142,7 @@ Questions? contact@carlogbook.app`
     }
 
     // ── AI SMART FALLBACK ─────────────────────────────────────────────────
-    const aiReply = await getAIFallbackReply(text, userCars, user.id, user.language);
+    const aiReply = await getAIFallbackReply(text, userCars, user.id);
     await sendReply(from, aiReply || t(user, "ai_fallback_default"));
     res.sendStatus(200);
 
